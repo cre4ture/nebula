@@ -17,6 +17,7 @@ func NewDeviceFromConfig(c *config.C, l *logrus.Logger, tunCidr *net.IPNet, rout
 	switch {
 	case c.GetBool("tun.disabled", false):
 		tun := newDisabledTun(tunCidr, c.GetInt("tun.tx_queue", 500), c.GetBool("stats.message_metrics", false), l)
+		tun.AddPortTunnelRulesFromConfig(c)
 		return tun, nil
 
 	default:

@@ -1,6 +1,7 @@
 package overlay
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/rcrowley/go-metrics"
 	"github.com/sirupsen/logrus"
+	"github.com/slackhq/nebula/config"
 	"github.com/slackhq/nebula/iputil"
 
 	"github.com/google/gopacket"
@@ -112,6 +114,11 @@ func (pt *PortTunnelUdp) listenLocalPort() error {
 	}
 }
 
+type tunnelConfig struct {
+	local  string
+	remote string
+}
+
 type disabledTun struct {
 	read chan []byte
 	cidr *net.IPNet
@@ -120,6 +127,9 @@ type disabledTun struct {
 	tx metrics.Counter
 	rx metrics.Counter
 	l  *logrus.Logger
+
+	configPortTunnelsUdp []tunnelConfig
+	configPortTunnelsTcp []tunnelConfig
 
 	portTunnelsUdp map[uint32]*PortTunnelUdp
 }
@@ -142,23 +152,90 @@ func newDisabledTun(cidr *net.IPNet, queueLen int, metricsEnabled bool, l *logru
 	return tun
 }
 
-func (t *disabledTun) Activate() error {
+func convertToPortTunnelConfig(_ *logrus.Logger, p interface{}) (tunnelConfig, error) {
+	fwd_tunnel := tunnelConfig{}
 
-	tunnel, err := setupPortTunnelUdp(
-		"127.0.0.1:3399",
-		"192.168.100.92:4499",
-		t.cidr.IP, func(out []byte) {
-			t.read <- out
-		},
-		t.l,
-	)
+	m, ok := p.(map[interface{}]interface{})
+	if !ok {
+		return fwd_tunnel, errors.New("could not parse tunnel config")
+	}
+
+	toString := func(k string, m map[interface{}]interface{}) string {
+		v, ok := m[k]
+		if !ok {
+			return ""
+		}
+		return fmt.Sprintf("%v", v)
+	}
+
+	fwd_tunnel.local = toString("local_address", m)
+	fwd_tunnel.remote = toString("remote_address", m)
+
+	return fwd_tunnel, nil
+}
+
+func (tun *disabledTun) readPortTunnelRulesFromConfig(c *config.C, protocol string) ([]tunnelConfig, error) {
+	table := "port_tunnel." + protocol
+	out := make([]tunnelConfig, 0)
+
+	r := c.Get(table)
+	if r == nil {
+		return nil, nil
+	}
+
+	rs, ok := r.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("%s failed to parse, should be an array of port tunnels", table)
+	}
+
+	for i, t := range rs {
+		portTunnelConfig, err := convertToPortTunnelConfig(tun.l, t)
+		if err != nil {
+			return nil, fmt.Errorf("%s port tunnel #%v; %s", table, i, err)
+		}
+		out = append(out, portTunnelConfig)
+	}
+
+	return out, nil
+}
+
+func (tun *disabledTun) AddPortTunnelRulesFromConfig(c *config.C) error {
+
+	udp, err := tun.readPortTunnelRulesFromConfig(c, "udp")
 	if err != nil {
 		return err
 	}
 
+	tcp, err := tun.readPortTunnelRulesFromConfig(c, "tcp")
+	if err != nil {
+		return err
+	}
+
+	tun.configPortTunnelsUdp = udp
+	tun.configPortTunnelsTcp = tcp
+
+	return nil
+}
+
+func (t *disabledTun) Activate() error {
+
 	t.portTunnelsUdp = make(map[uint32]*PortTunnelUdp)
-	t.portTunnelsUdp[3399] = tunnel
-	go tunnel.listenLocalPort()
+	for id, config := range t.configPortTunnelsUdp {
+		tunnel, err := setupPortTunnelUdp(
+			config.local,
+			config.remote,
+			t.cidr.IP,
+			func(out []byte) {
+				t.read <- out
+			},
+			t.l,
+		)
+		if err != nil {
+			t.l.Errorf("failed to setup port tunnel(%d): %+v", id, config)
+		}
+		t.portTunnelsUdp[uint32(tunnel.localUdpListenAddr.Port)] = tunnel
+		go tunnel.listenLocalPort()
+	}
 
 	return nil
 }
