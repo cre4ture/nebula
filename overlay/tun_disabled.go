@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
+	"os"
 	"slices"
 	"strings"
 
@@ -114,6 +116,204 @@ func (pt *PortTunnelUdp) listenLocalPort() error {
 	}
 }
 
+type tcpIpPackageDecoder struct {
+	l         *logrus.Logger
+	ip4       *layers.IPv4
+	tcp       *layers.TCP
+	container *gopacket.DecodingLayerContainer
+	decoder   *gopacket.DecodingLayerFunc
+	decoded   []gopacket.LayerType
+}
+
+func constructIp4Decoder(l *logrus.Logger) *tcpIpPackageDecoder {
+	ip4 := &layers.IPv4{}
+	tcp := &layers.TCP{}
+	dlc := gopacket.DecodingLayerContainer(gopacket.DecodingLayerArray(nil))
+	dlc = dlc.Put(ip4)
+	dlc = dlc.Put(tcp)
+	// you may specify some meaningful DecodeFeedback
+	decoder := dlc.LayersDecoder(layers.LayerTypeIPv4, gopacket.NilDecodeFeedback)
+	decoded := make([]gopacket.LayerType, 0, 20)
+
+	return &tcpIpPackageDecoder{
+		l:         l,
+		ip4:       ip4,
+		tcp:       tcp,
+		container: &dlc,
+		decoder:   &decoder,
+		decoded:   decoded,
+	}
+}
+
+func (d *tcpIpPackageDecoder) decode(packetData []byte) error {
+
+	lt, err := (*d.decoder)(packetData, &d.decoded)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Could not decode layers: %v\n", err)
+		return err
+	}
+	if lt != gopacket.LayerTypeZero {
+		fmt.Fprintf(os.Stderr, "unknown layer type: %v\n", lt)
+		return err
+	}
+	d.l.Debugf("decoded layers: %+v", d.decoded)
+	if !slices.Contains(d.decoded, layers.LayerTypeIPv4) ||
+		!slices.Contains(d.decoded, layers.LayerTypeTCP) {
+		d.l.Warnf("Could not decode layers: Missing IPv4 or TCP\n")
+		return errors.New("failed to decode TCP package")
+	}
+	return nil
+}
+
+type PortTunnelTcp struct {
+	l                        *logrus.Logger
+	ownIpInOverlayNet        net.IP
+	send                     func([]byte)
+	localTcpListenAddr       *net.TCPAddr
+	listenConnection         *net.TCPListener
+	remoteTcpAddr            *net.TCPAddr
+	outsideClientConnections map[uint32]chan []byte
+}
+
+func setupPortTunnelTcp(
+	localListeningAddress string,
+	remoteDestinationAddress string,
+	ownIpInOverlayNet net.IP,
+	send func([]byte),
+	l *logrus.Logger,
+) (*PortTunnelTcp, error) {
+	localTcpListenAddr, err := net.ResolveTCPAddr("tcp", localListeningAddress)
+	if err != nil {
+		return nil, err
+	}
+	remoteTcpAddr, err := net.ResolveTCPAddr("tcp", remoteDestinationAddress)
+	if err != nil {
+		return nil, err
+	}
+
+	localListenPort, err := net.ListenTCP("tcp", localTcpListenAddr)
+	if err != nil {
+		return nil, err
+	}
+
+	l.Infof("TCP port tunnel to '%v': listening on local TCP addr: '%v'",
+		remoteTcpAddr, localTcpListenAddr)
+
+	return &PortTunnelTcp{
+		l:                        l,
+		ownIpInOverlayNet:        ownIpInOverlayNet,
+		send:                     send,
+		localTcpListenAddr:       localTcpListenAddr,
+		listenConnection:         localListenPort,
+		remoteTcpAddr:            remoteTcpAddr,
+		outsideClientConnections: make(map[uint32]chan []byte),
+	}, nil
+}
+
+func (pt *PortTunnelTcp) handleResponse(b []byte) error {
+	if pt.localSourceAddr != nil {
+		_, err := pt.listenConnection.WriteToUDP(b, pt.localSourceAddr)
+		return err
+	}
+	return nil
+}
+
+func (pt *PortTunnelTcp) listenLocalPort() error {
+	for {
+		pt.l.Debug("listening on local TCP port ...")
+		connection, err := pt.listenConnection.AcceptTCP()
+		if err != nil {
+			fmt.Println(err)
+			return err
+		}
+
+		pt.l.Debugf("accept TCP connect from local TCP port: %v", connection.RemoteAddr())
+
+		localTcpAddr, err := net.ResolveTCPAddr("tcp", connection.LocalAddr().String())
+		if err != nil {
+			return err
+		}
+
+		rx_chan := make(chan []byte)
+		pt.outsideClientConnections[uint32(localTcpAddr.Port)] = rx_chan
+
+		go func() {
+
+			ipLayer := &layers.IPv4{
+				Version:  4,
+				TTL:      64,
+				SrcIP:    pt.ownIpInOverlayNet,
+				DstIP:    pt.remoteTcpAddr.IP,
+				Protocol: layers.IPProtocolUDP,
+			}
+			tcpLayer := &layers.TCP{
+				SrcPort: layers.TCPPort(pt.localTcpListenAddr.Port),
+				DstPort: layers.TCPPort(pt.remoteTcpAddr.Port),
+			}
+			tcpLayer.SetNetworkLayerForChecksum(ipLayer)
+			opts := gopacket.SerializeOptions{
+				ComputeChecksums: true,
+				FixLengths:       true,
+			}
+
+			buf := make([]byte, 512*1024)
+			generateAndSendPackage := func(n uint) {
+				sendBuf := gopacket.NewSerializeBuffer()
+				gopacket.SerializeLayers(sendBuf, opts,
+					ipLayer,
+					tcpLayer,
+					gopacket.Payload(buf[0:n]))
+				packetData := sendBuf.Bytes()
+				pt.send(packetData)
+			}
+
+			A := rand.Uint32()
+			tcpLayer.SYN = true
+			tcpLayer.Seq = A
+
+			generateAndSendPackage(0)
+
+			response := <-rx_chan
+
+			tcp_decoder := constructIp4Decoder(pt.l)
+			tcp_decoder.decode(response)
+
+			if !(tcp_decoder.tcp.SYN && tcp_decoder.tcp.ACK && (tcp_decoder.tcp.Ack == A+1)) {
+				pt.l.Infof("error: acknowledge failed of TCP connection from local TCP port: %v, err: %v",
+					connection.RemoteAddr(), err)
+				return
+			}
+			B := tcp_decoder.tcp.Seq
+
+			tcpLayer.SYN = false
+			tcpLayer.ACK = true
+			tcpLayer.Seq = A + 1
+			tcpLayer.Ack = B + 1
+
+			generateAndSendPackage(0)
+
+			for {
+				n, err := connection.Read(buf)
+				if err != nil {
+					pt.l.Infof("error: closing TCP connection from local TCP port: %v, err: %v",
+						connection.RemoteAddr(), err)
+					return
+				}
+
+				sendBuf := gopacket.NewSerializeBuffer()
+				gopacket.SerializeLayers(sendBuf, opts,
+					ipLayer,
+					tcpLayer,
+					gopacket.Payload(buf[0:n]))
+				packetData := sendBuf.Bytes()
+				pt.send(packetData)
+
+				pt.l.Debugf("send message to: %+v, %+v, payload-size: %d", ipLayer, tcpLayer, n)
+			}
+		}()
+	}
+}
+
 type tunnelConfig struct {
 	local  string
 	remote string
@@ -132,6 +332,7 @@ type disabledTun struct {
 	configPortTunnelsTcp []tunnelConfig
 
 	portTunnelsUdp map[uint32]*PortTunnelUdp
+	portTunnelsTcp map[uint32]*PortTunnelTcp
 }
 
 func newDisabledTun(cidr *net.IPNet, queueLen int, metricsEnabled bool, l *logrus.Logger) *disabledTun {
@@ -231,7 +432,25 @@ func (t *disabledTun) Activate() error {
 			t.l,
 		)
 		if err != nil {
-			t.l.Errorf("failed to setup port tunnel(%d): %+v", id, config)
+			t.l.Errorf("failed to setup UDP port tunnel(%d): %+v", id, config)
+		}
+		t.portTunnelsUdp[uint32(tunnel.localUdpListenAddr.Port)] = tunnel
+		go tunnel.listenLocalPort()
+	}
+
+	t.portTunnelsTcp = make(map[uint32]*PortTunnelTcp)
+	for id, config := range t.configPortTunnelsTcp {
+		tunnel, err := setupPortTunnelTcp(
+			config.local,
+			config.remote,
+			t.cidr.IP,
+			func(out []byte) {
+				t.read <- out
+			},
+			t.l,
+		)
+		if err != nil {
+			t.l.Errorf("failed to setup TCP port tunnel(%d): %+v", id, config)
 		}
 		t.portTunnelsUdp[uint32(tunnel.localUdpListenAddr.Port)] = tunnel
 		go tunnel.listenLocalPort()
