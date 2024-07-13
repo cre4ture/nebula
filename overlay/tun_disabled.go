@@ -4,8 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand/v2"
+	"log"
 	"net"
+	"net/netip"
 	"os"
 	"slices"
 	"strings"
@@ -14,6 +15,10 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/slackhq/nebula/config"
 	"github.com/slackhq/nebula/iputil"
+	"golang.zx2c4.com/wireguard/conn"
+	"golang.zx2c4.com/wireguard/device"
+	"golang.zx2c4.com/wireguard/tun"
+	"golang.zx2c4.com/wireguard/tun/netstack"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -173,6 +178,9 @@ type PortTunnelTcp struct {
 	listenConnection         *net.TCPListener
 	remoteTcpAddr            *net.TCPAddr
 	outsideClientConnections map[uint32]chan []byte
+	tunDevice                *tun.Device
+	tunNet                   *netstack.Net
+	device                   *device.Device
 }
 
 func setupPortTunnelTcp(
@@ -196,6 +204,15 @@ func setupPortTunnelTcp(
 		return nil, err
 	}
 
+	tun, tnet, err := netstack.CreateNetTUN(
+		[]netip.Addr{netip.MustParseAddr(ownIpInOverlayNet.String())},
+		[]netip.Addr{},
+		1420)
+	if err != nil {
+		log.Panic(err)
+	}
+	dev := device.NewDevice(tun, conn.NewDefaultBind(), device.NewLogger(device.LogLevelVerbose, ""))
+
 	l.Infof("TCP port tunnel to '%v': listening on local TCP addr: '%v'",
 		remoteTcpAddr, localTcpListenAddr)
 
@@ -207,6 +224,9 @@ func setupPortTunnelTcp(
 		listenConnection:         localListenPort,
 		remoteTcpAddr:            remoteTcpAddr,
 		outsideClientConnections: make(map[uint32]chan []byte),
+		tunDevice:                &tun,
+		tunNet:                   tnet,
+		device:                   dev,
 	}, nil
 }
 
@@ -237,61 +257,14 @@ func (pt *PortTunnelTcp) listenLocalPort() error {
 		rx_chan := make(chan []byte)
 		pt.outsideClientConnections[uint32(localTcpAddr.Port)] = rx_chan
 
+		tcpClientConnection, err := pt.tunNet.DialTCPAddrPort(netip.MustParseAddrPort(pt.remoteTcpAddr.String()))
+		if err != nil {
+			return err
+		}
+
 		go func() {
 
-			ipLayer := &layers.IPv4{
-				Version:  4,
-				TTL:      64,
-				SrcIP:    pt.ownIpInOverlayNet,
-				DstIP:    pt.remoteTcpAddr.IP,
-				Protocol: layers.IPProtocolUDP,
-			}
-			tcpLayer := &layers.TCP{
-				SrcPort: layers.TCPPort(pt.localTcpListenAddr.Port),
-				DstPort: layers.TCPPort(pt.remoteTcpAddr.Port),
-			}
-			tcpLayer.SetNetworkLayerForChecksum(ipLayer)
-			opts := gopacket.SerializeOptions{
-				ComputeChecksums: true,
-				FixLengths:       true,
-			}
-
 			buf := make([]byte, 512*1024)
-			generateAndSendPackage := func(n uint) {
-				sendBuf := gopacket.NewSerializeBuffer()
-				gopacket.SerializeLayers(sendBuf, opts,
-					ipLayer,
-					tcpLayer,
-					gopacket.Payload(buf[0:n]))
-				packetData := sendBuf.Bytes()
-				pt.send(packetData)
-			}
-
-			A := rand.Uint32()
-			tcpLayer.SYN = true
-			tcpLayer.Seq = A
-
-			generateAndSendPackage(0)
-
-			response := <-rx_chan
-
-			tcp_decoder := constructIp4Decoder(pt.l)
-			tcp_decoder.decode(response)
-
-			if !(tcp_decoder.tcp.SYN && tcp_decoder.tcp.ACK && (tcp_decoder.tcp.Ack == A+1)) {
-				pt.l.Infof("error: acknowledge failed of TCP connection from local TCP port: %v, err: %v",
-					connection.RemoteAddr(), err)
-				return
-			}
-			B := tcp_decoder.tcp.Seq
-
-			tcpLayer.SYN = false
-			tcpLayer.ACK = true
-			tcpLayer.Seq = A + 1
-			tcpLayer.Ack = B + 1
-
-			generateAndSendPackage(0)
-
 			for {
 				n, err := connection.Read(buf)
 				if err != nil {
