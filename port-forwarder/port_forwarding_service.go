@@ -134,7 +134,7 @@ func setupPortTunnelUdp(
 		return nil, err
 	}
 
-	localListenPort, err := net.ListenUDP("udp", localUdpListenAddr)
+	localListenConnection, err := net.ListenUDP("udp", localUdpListenAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -147,7 +147,7 @@ func setupPortTunnelUdp(
 		tunService:            tunService,
 		localUdpListenAddr:    localUdpListenAddr,
 		remoteUdpAddr:         remoteUdpAddr,
-		localListenConnection: localListenPort,
+		localListenConnection: localListenConnection,
 	}
 
 	go tunnel.listenLocalPort()
