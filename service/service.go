@@ -229,6 +229,19 @@ func (s *Service) Listen(network, address string) (net.Listener, error) {
 	return l, nil
 }
 
+func (s *Service) ListenUDP(address string) (*gonet.UDPConn, error) {
+	addr, err := net.ResolveUDPAddr("udp", address)
+	if err != nil {
+		return nil, err
+	}
+	return gonet.DialUDP(s.ipstack, &tcpip.FullAddress{
+		NIC:      nicID,
+		Addr:     tcpip.AddrFromSlice(addr.IP),
+		Port:     uint16(addr.Port),
+		LinkAddr: "",
+	}, nil, ipv4.ProtocolNumber)
+}
+
 func (s *Service) Wait() error {
 	return s.eg.Wait()
 }
