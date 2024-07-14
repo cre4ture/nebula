@@ -1,13 +1,12 @@
 package overlay
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
-	"net/netip"
-	"os"
 	"slices"
 	"strings"
 
@@ -15,10 +14,13 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/slackhq/nebula/config"
 	"github.com/slackhq/nebula/iputil"
-	"golang.zx2c4.com/wireguard/conn"
-	"golang.zx2c4.com/wireguard/device"
-	"golang.zx2c4.com/wireguard/tun"
-	"golang.zx2c4.com/wireguard/tun/netstack"
+	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
+	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
+	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
+	"gvisor.dev/gvisor/pkg/waiter"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -121,55 +123,6 @@ func (pt *PortTunnelUdp) listenLocalPort() error {
 	}
 }
 
-type tcpIpPackageDecoder struct {
-	l         *logrus.Logger
-	ip4       *layers.IPv4
-	tcp       *layers.TCP
-	container *gopacket.DecodingLayerContainer
-	decoder   *gopacket.DecodingLayerFunc
-	decoded   []gopacket.LayerType
-}
-
-func constructIp4Decoder(l *logrus.Logger) *tcpIpPackageDecoder {
-	ip4 := &layers.IPv4{}
-	tcp := &layers.TCP{}
-	dlc := gopacket.DecodingLayerContainer(gopacket.DecodingLayerArray(nil))
-	dlc = dlc.Put(ip4)
-	dlc = dlc.Put(tcp)
-	// you may specify some meaningful DecodeFeedback
-	decoder := dlc.LayersDecoder(layers.LayerTypeIPv4, gopacket.NilDecodeFeedback)
-	decoded := make([]gopacket.LayerType, 0, 20)
-
-	return &tcpIpPackageDecoder{
-		l:         l,
-		ip4:       ip4,
-		tcp:       tcp,
-		container: &dlc,
-		decoder:   &decoder,
-		decoded:   decoded,
-	}
-}
-
-func (d *tcpIpPackageDecoder) decode(packetData []byte) error {
-
-	lt, err := (*d.decoder)(packetData, &d.decoded)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Could not decode layers: %v\n", err)
-		return err
-	}
-	if lt != gopacket.LayerTypeZero {
-		fmt.Fprintf(os.Stderr, "unknown layer type: %v\n", lt)
-		return err
-	}
-	d.l.Debugf("decoded layers: %+v", d.decoded)
-	if !slices.Contains(d.decoded, layers.LayerTypeIPv4) ||
-		!slices.Contains(d.decoded, layers.LayerTypeTCP) {
-		d.l.Warnf("Could not decode layers: Missing IPv4 or TCP\n")
-		return errors.New("failed to decode TCP package")
-	}
-	return nil
-}
-
 type PortTunnelTcp struct {
 	l                        *logrus.Logger
 	ownIpInOverlayNet        net.IP
@@ -178,9 +131,8 @@ type PortTunnelTcp struct {
 	listenConnection         *net.TCPListener
 	remoteTcpAddr            *net.TCPAddr
 	outsideClientConnections map[uint32]chan []byte
-	tunDevice                *tun.Device
-	tunNet                   *netstack.Net
-	device                   *device.Device
+	stack                    *stack.Stack
+	linkEP                   *channel.Endpoint
 }
 
 func setupPortTunnelTcp(
@@ -204,14 +156,52 @@ func setupPortTunnelTcp(
 		return nil, err
 	}
 
-	tun, tnet, err := netstack.CreateNetTUN(
-		[]netip.Addr{netip.MustParseAddr(ownIpInOverlayNet.String())},
-		[]netip.Addr{},
-		1420)
+	// local listening initialized
+
+	addr := tcpip.AddrFromSlice(ownIpInOverlayNet)
+
+	// Create the stack with ipv4 and tcp protocols, then add a channel-based
+	// NIC and ipv4 address.
+	s := stack.New(stack.Options{
+		NetworkProtocols: []stack.NetworkProtocolFactory{func(s *stack.Stack) stack.NetworkProtocol {
+			return ipv4.NewProtocol(s)
+		}},
+		TransportProtocols: []stack.TransportProtocolFactory{func(s *stack.Stack) stack.TransportProtocol {
+			return tcp.NewProtocol(s)
+		}},
+	})
+
+	// this link address should be irrelevant as we have UDP as link layer
+	linkAddress, err := tcpip.ParseMACAddress("aa:bb:cc:dd:ee:ff")
 	if err != nil {
-		log.Panic(err)
+		return nil, err
 	}
-	dev := device.NewDevice(tun, conn.NewDefaultBind(), device.NewLogger(device.LogLevelVerbose, ""))
+
+	linkEP := channel.New(100, 9001, linkAddress) // TODO
+	if err := s.CreateNIC(1, linkEP); err != nil {
+		log.Fatal(err)
+	}
+
+	if err := s.AddProtocolAddress(1,
+		tcpip.ProtocolAddress{
+			Protocol: ipv4.ProtocolNumber,
+			AddressWithPrefix: tcpip.AddressWithPrefix{
+				Address:   addr,
+				PrefixLen: 24, // TODO
+			},
+		},
+		stack.AddressProperties{},
+	); err != nil {
+		log.Fatal(err)
+	}
+
+	// Add default route.
+	s.SetRouteTable([]tcpip.Route{
+		{
+			Destination: header.IPv4EmptySubnet,
+			NIC:         1,
+		},
+	})
 
 	l.Infof("TCP port tunnel to '%v': listening on local TCP addr: '%v'",
 		remoteTcpAddr, localTcpListenAddr)
@@ -224,16 +214,17 @@ func setupPortTunnelTcp(
 		listenConnection:         localListenPort,
 		remoteTcpAddr:            remoteTcpAddr,
 		outsideClientConnections: make(map[uint32]chan []byte),
-		tunDevice:                &tun,
-		tunNet:                   tnet,
-		device:                   dev,
+		stack:                    s,
+		linkEP:                   linkEP,
 	}, nil
 }
 
 func (pt *PortTunnelTcp) handleResponse(b []byte) error {
-	if pt.localSourceAddr != nil {
-		_, err := pt.listenConnection.WriteToUDP(b, pt.localSourceAddr)
-		return err
+	if pt.linkEP != nil {
+		pt.linkEP.InjectInbound(
+			tcpip.NetworkProtocolNumber(2048),
+			stack.NewPacketBuffer()
+		) // TODO
 	}
 	return nil
 }
@@ -257,33 +248,107 @@ func (pt *PortTunnelTcp) listenLocalPort() error {
 		rx_chan := make(chan []byte)
 		pt.outsideClientConnections[uint32(localTcpAddr.Port)] = rx_chan
 
-		tcpClientConnection, err := pt.tunNet.DialTCPAddrPort(netip.MustParseAddrPort(pt.remoteTcpAddr.String()))
-		if err != nil {
-			return err
+		go pt.handleClientConnection(connection)
+	}
+}
+
+func (pt *PortTunnelTcp) handleClientConnection(localConnection *net.TCPConn) error {
+
+	// Create TCP endpoint.
+	var wq waiter.Queue
+	remoteConnection, e := pt.stack.NewEndpoint(tcp.ProtocolNumber, ipv4.ProtocolNumber, &wq)
+	if e != nil {
+		log.Fatal(e)
+		return errors.New(e.String())
+	}
+
+	remote := tcpip.FullAddress{
+		NIC:  1,
+		Addr: tcpip.AddrFromSlice(pt.remoteTcpAddr.IP),
+		Port: uint16(pt.remoteTcpAddr.Port),
+	}
+
+	{
+		// Issue connect request and wait for it to complete.
+		waitEntry, notifyCh := waiter.NewChannelEntry(waiter.EventOut)
+		wq.EventRegister(&waitEntry)
+		terr := remoteConnection.Connect(remote)
+		if (terr == &tcpip.ErrConnectStarted{}) {
+			fmt.Println("Connect is pending...")
+			<-notifyCh
+			terr = remoteConnection.SocketOptions().GetLastError()
+		}
+		wq.EventUnregister(&waitEntry)
+
+		if terr != nil {
+			log.Fatal("Unable to connect: ", terr)
+			return errors.New(fmt.Sprintf("Unable to connect: ", terr))
 		}
 
-		go func() {
+		fmt.Println("Connected")
+	}
 
-			buf := make([]byte, 512*1024)
-			for {
-				n, err := connection.Read(buf)
-				if err != nil {
-					pt.l.Infof("error: closing TCP connection from local TCP port: %v, err: %v",
-						connection.RemoteAddr(), err)
-					return
-				}
+	// Start the writer in its own goroutine.
+	writerCompletedCh := make(chan struct{})
+	go writer(writerCompletedCh, localConnection, remoteConnection)
 
-				sendBuf := gopacket.NewSerializeBuffer()
-				gopacket.SerializeLayers(sendBuf, opts,
-					ipLayer,
-					tcpLayer,
-					gopacket.Payload(buf[0:n]))
-				packetData := sendBuf.Bytes()
-				pt.send(packetData)
+	// Read data and write to standard output until the peer closes the
+	// connection from its side.
+	waitEntry, notifyCh := waiter.NewChannelEntry(waiter.EventIn)
+	wq.EventRegister(&waitEntry)
 
-				pt.l.Debugf("send message to: %+v, %+v, payload-size: %d", ipLayer, tcpLayer, n)
+	var buf bytes.Buffer
+	for {
+		_, err := remoteConnection.Read(&buf, tcpip.ReadOptions{})
+		if err != nil {
+			if (err == &tcpip.ErrClosedForReceive{}) {
+				break
 			}
-		}()
+
+			if (err == &tcpip.ErrWouldBlock{}) {
+				<-notifyCh
+				continue
+			}
+
+			log.Fatal("Read() failed:", err)
+		}
+
+		_, e := localConnection.Write(buf.Bytes())
+		if e != nil {
+			log.Fatal(e)
+			return e
+		}
+	}
+	wq.EventUnregister(&waitEntry)
+
+	// The reader has completed. Now wait for the writer as well.
+	<-writerCompletedCh
+
+	remoteConnection.Close()
+	return nil
+}
+
+func writer(ch chan struct{}, localConnection *net.TCPConn, remoteConnection tcpip.Endpoint) {
+	defer func() {
+		remoteConnection.Shutdown(tcpip.ShutdownWrite)
+		close(ch)
+	}()
+
+	buf := make([]byte, 512*1024)
+	for {
+		n, err := localConnection.Read(buf)
+		if err != nil {
+			return
+		}
+
+		reader := bytes.NewReader(buf[:n])
+		for reader.Len() > 0 {
+			_, werr := remoteConnection.Write(reader, tcpip.WriteOptions{})
+			if werr != nil {
+				fmt.Println("Write failed:", werr)
+				return
+			}
+		}
 	}
 }
 
