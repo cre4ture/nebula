@@ -174,6 +174,22 @@ func (s *Service) DialContext(ctx context.Context, network, address string) (net
 	return gonet.DialContextTCP(ctx, s.ipstack, fullAddr, ipv4.ProtocolNumber)
 }
 
+// DialContext dials the provided address. Currently only TCP is supported.
+func (s *Service) DialUDP(address string) (*gonet.UDPConn, error) {
+	addr, err := net.ResolveUDPAddr("udp", address)
+	if err != nil {
+		return nil, err
+	}
+
+	fullAddr := tcpip.FullAddress{
+		NIC:  nicID,
+		Addr: tcpip.AddrFromSlice(addr.IP),
+		Port: uint16(addr.Port),
+	}
+
+	return gonet.DialUDP(s.ipstack, nil, &fullAddr, ipv4.ProtocolNumber)
+}
+
 // Listen listens on the provided address. Currently only TCP with wildcard
 // addresses are supported.
 func (s *Service) Listen(network, address string) (net.Listener, error) {

@@ -13,6 +13,14 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+type PortTunnelUdp struct {
+	l                     *logrus.Logger
+	tunService            *service.Service
+	localUdpListenAddr    *net.UDPAddr
+	remoteUdpAddr         *net.UDPAddr
+	localListenConnection *net.UDPConn
+}
+
 type PortTunnelTcp struct {
 	l                     *logrus.Logger
 	tunService            *service.Service
@@ -33,7 +41,7 @@ type PortForwardingService struct {
 	configPortTunnelsUdp []tunnelConfig
 	configPortTunnelsTcp []tunnelConfig
 
-	//portTunnelsUdp map[uint32]*PortTunnelUdp
+	portTunnelsUdp map[uint32]*PortTunnelUdp
 	portTunnelsTcp map[uint32]*PortTunnelTcp
 }
 
@@ -84,10 +92,15 @@ func (pfService *PortForwardingService) readPortTunnelRulesFromConfig(c *config.
 	return out, nil
 }
 
-func ConstructFromConfig(l *logrus.Logger, c *config.C) (*PortForwardingService, error) {
+func ConstructFromConfig(
+	tunService *service.Service,
+	l *logrus.Logger,
+	c *config.C,
+) (*PortForwardingService, error) {
 
 	pfService := &PortForwardingService{
-		l: l,
+		l:          l,
+		tunService: tunService,
 	}
 
 	udp, err := pfService.readPortTunnelRulesFromConfig(c, "udp")
@@ -104,6 +117,116 @@ func ConstructFromConfig(l *logrus.Logger, c *config.C) (*PortForwardingService,
 	pfService.configPortTunnelsTcp = tcp
 
 	return pfService, nil
+}
+
+func setupPortTunnelUdp(
+	tunService *service.Service,
+	localListeningAddress string,
+	remoteDestinationAddress string,
+	l *logrus.Logger,
+) (*PortTunnelUdp, error) {
+	localUdpListenAddr, err := net.ResolveUDPAddr("udp", localListeningAddress)
+	if err != nil {
+		return nil, err
+	}
+	remoteUdpAddr, err := net.ResolveUDPAddr("udp", remoteDestinationAddress)
+	if err != nil {
+		return nil, err
+	}
+
+	localListenPort, err := net.ListenUDP("udp", localUdpListenAddr)
+	if err != nil {
+		return nil, err
+	}
+
+	l.Infof("UDP port tunnel to '%v': listening on local UDP addr: '%v'",
+		remoteUdpAddr, localUdpListenAddr)
+
+	tunnel := &PortTunnelUdp{
+		l:                     l,
+		tunService:            tunService,
+		localUdpListenAddr:    localUdpListenAddr,
+		remoteUdpAddr:         remoteUdpAddr,
+		localListenConnection: localListenPort,
+	}
+
+	go tunnel.listenLocalPort()
+
+	return tunnel, nil
+}
+
+func (pt *PortTunnelUdp) listenLocalPort() error {
+	outsideReaderGroup := errgroup.Group{}
+	outsidePortReaders := make(map[string]interface{})
+	var buf [512 * 1024]byte
+	for {
+		pt.l.Debug("listening on local UDP port ...")
+		n, localSourceAddr, err := pt.localListenConnection.ReadFromUDP(buf[0:])
+		if err != nil {
+			fmt.Println(err)
+			return err
+		}
+
+		pt.l.Debugf("handling message from local UDP port: %v", localSourceAddr)
+
+		remoteConnection, err := pt.tunService.DialUDP(pt.remoteUdpAddr.AddrPort().String())
+		if err != nil {
+			return err
+		}
+
+		remoteConnection.Write(buf[:n])
+
+		pt.l.Debugf("send message from %+v, to: %+v, payload-size: %d",
+			localSourceAddr, pt.remoteUdpAddr, n)
+
+		_, ok := outsidePortReaders[remoteConnection.LocalAddr().String()]
+		if !ok {
+			outsideReaderGroup.Go(func() error {
+				myLocalSourceAddr := localSourceAddr
+				remoteConnection.SetDeadline(time.Time{})
+				empty_buf := make([]byte, 0)
+				buf := make([]byte, 2*(1<<16))
+				for {
+					n, err = remoteConnection.Read(buf)
+					if n == 0 && (err != nil) {
+						pt.l.Debugf("finish reading from UDP remote. read failed: err: %v", err)
+						return err
+					}
+
+					n, _, err = pt.localListenConnection.WriteMsgUDP(
+						buf[:n], empty_buf, myLocalSourceAddr)
+					if n == 0 && (err != nil) {
+						pt.l.Debugf("finish reading from UDP remote. local write failed: err: %v", err)
+						return err
+					}
+				}
+			})
+		}
+	}
+}
+
+func (pt *PortTunnelUdp) listenLocalOutsidePort() error {
+	var buf [512 * 1024]byte
+	for {
+		pt.l.Debug("listening on local UDP port ...")
+		n, localSourceAddr, err := pt.localListenConnection.ReadFromUDP(buf[0:])
+		if err != nil {
+			fmt.Println(err)
+			return err
+		}
+
+		pt.l.Debugf("handling message from local UDP port: %v", localSourceAddr)
+
+		remoteConnection, err := pt.tunService.DialUDP(pt.remoteUdpAddr.AddrPort().String())
+		if err != nil {
+			return err
+		}
+
+		remoteConnection.Write(buf[:n])
+
+		pt.l.Debugf("send message from %+v, to: %+v, payload-size: %d",
+			localSourceAddr, pt.remoteUdpAddr, n)
+	}
 }
 
 func setupPortTunnelTcp(
@@ -173,13 +296,13 @@ func (pt *PortTunnelTcp) handleClientConnection(localConnection *net.TCPConn) er
 			//from.SetReadDeadline(time.Now().Add(time.Millisecond * 3))
 			n, err := from.Read(buf)
 			if n == 0 && (err != nil) {
-				pt.l.Infof("reading from local client connection failed: %v", err)
+				pt.l.Infof("reading from from-connection failed: %v", err)
 				return err
 			}
 			for i := 0; i < n; {
 				n, err = to.Write(buf[i:n])
 				if err != nil {
-					pt.l.Infof("writing to remote server connection failed: %v", err)
+					pt.l.Infof("writing to to-connection failed: %v", err)
 					return err
 				}
 				i += n
@@ -195,31 +318,26 @@ func (pt *PortTunnelTcp) handleClientConnection(localConnection *net.TCPConn) er
 	return errGroup.Wait()
 }
 
-func (t *PortForwardingService) Activate(tunService *service.Service) error {
+func (t *PortForwardingService) Activate() error {
 
-	//for id, config := range t.configPortTunnelsUdp {
-	//	tunnel, err := setupPortTunnelUdp(
-	//		config.local,
-	//		config.remote,
-	//		t.cidr.IP,
-	//		func(out []byte) {
-	//			t.read <- out
-	//		},
-	//		t.l,
-	//	)
-	//	if err != nil {
-	//		t.l.Errorf("failed to setup UDP port tunnel(%d): %+v", id, config)
-	//	}
-	//	t.portTunnelsUdp[uint32(tunnel.localUdpListenAddr.Port)] = tunnel
-	//	go tunnel.listenLocalPort()
-	//}
-
-	t.tunService = tunService
+	t.portTunnelsUdp = make(map[uint32]*PortTunnelUdp)
+	for id, config := range t.configPortTunnelsUdp {
+		tunnel, err := setupPortTunnelUdp(
+			t.tunService,
+			config.local,
+			config.remote,
+			t.l,
+		)
+		if err != nil {
+			t.l.Errorf("failed to setup UDP port tunnel(%d): %+v", id, config)
+		}
+		t.portTunnelsUdp[uint32(tunnel.localUdpListenAddr.Port)] = tunnel
+	}
 
 	t.portTunnelsTcp = make(map[uint32]*PortTunnelTcp)
 	for id, config := range t.configPortTunnelsTcp {
 		tunnel, err := setupPortTunnelTcp(
-			tunService,
+			t.tunService,
 			config.local,
 			config.remote,
 			t.l,

@@ -72,12 +72,12 @@ func main() {
 		}
 
 		// initialize port forwarding:
-		pf_service, err := port_forwarder.ConstructFromConfig(l, c)
+		pf_service, err := port_forwarder.ConstructFromConfig(service, l, c)
 		if err != nil {
 			util.LogWithContextIfNeeded("Failed to start", err, l)
 			return
 		}
-		pf_service.Activate(service)
+		pf_service.Activate()
 
 		// wait for termination request
 		signalChannel := make(chan os.Signal, 1)
