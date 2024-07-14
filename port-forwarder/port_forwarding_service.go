@@ -262,30 +262,51 @@ func (pt *PortTunnelTcp) acceptOnLocalListenPort() error {
 	}
 }
 
-func (pt *PortTunnelTcp) handleClientConnection(localConnection *net.TCPConn) error {
+func (pt *PortTunnelTcp) handleClientConnection(localConnection *net.TCPConn) {
+	err := pt.handleClientConnection_intern(localConnection)
+	if err != nil {
+		pt.l.Infof("Closed TCP client connection. Err: %v", err)
+	}
+}
+
+func (pt *PortTunnelTcp) handleClientConnection_intern(localConnection *net.TCPConn) error {
 
 	remoteConnection, err := pt.tunService.DialContext(context.Background(), "tcp", pt.remoteTcpAddr.String())
 	if err != nil {
 		return err
 	}
 
+	dataTransferCtx, cancel := context.WithCancel(context.Background())
+
 	dataTransferHandler := func(from, to net.Conn) error {
+
+		defer from.Close()
+		defer to.Close()
+
 		// no write timeout
 		to.SetWriteDeadline(time.Time{})
 		from.SetReadDeadline(time.Time{})
 		buf := make([]byte, 1)
 		for {
+			select {
+			case <-dataTransferCtx.Done():
+				return nil
+			default:
+			}
+
 			// short read timeout to be able to forward also short packages
 			//from.SetReadDeadline(time.Now().Add(time.Millisecond * 3))
 			n, err := from.Read(buf)
 			if n == 0 && (err != nil) {
 				pt.l.Infof("reading from from-connection failed: %v", err)
+				cancel()
 				return err
 			}
 			for i := 0; i < n; {
 				n, err = to.Write(buf[i:n])
 				if err != nil {
 					pt.l.Infof("writing to to-connection failed: %v", err)
+					cancel()
 					return err
 				}
 				i += n
