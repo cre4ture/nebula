@@ -373,6 +373,7 @@ firewall:
 # using a tun/tap device and thus without requiring root access on the host.
 # Port tunnels are only supported when setting "tun.user" is set to true and thus
 # a user-tun instead of a real one is used.
+# IMPORTANT: For ingoing tunnels, don't forget to also open the firewall for the relevant ports.
 port_tunnel:
   outgoing:
     udp:
