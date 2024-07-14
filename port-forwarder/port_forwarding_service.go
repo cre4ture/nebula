@@ -212,30 +212,6 @@ func (pt *PortTunnelUdp) listenLocalPort() error {
 	}
 }
 
-func (pt *PortTunnelUdp) listenLocalOutsidePort() error {
-	var buf [512 * 1024]byte
-	for {
-		pt.l.Debug("listening on local UDP port ...")
-		n, localSourceAddr, err := pt.localListenConnection.ReadFromUDP(buf[0:])
-		if err != nil {
-			fmt.Println(err)
-			return err
-		}
-
-		pt.l.Debugf("handling message from local UDP port: %v", localSourceAddr)
-
-		remoteConnection, err := pt.tunService.DialUDP(pt.remoteUdpAddr.AddrPort().String())
-		if err != nil {
-			return err
-		}
-
-		remoteConnection.Write(buf[:n])
-
-		pt.l.Debugf("send message from %+v, to: %+v, payload-size: %d",
-			localSourceAddr, pt.remoteUdpAddr, n)
-	}
-}
-
 func setupPortTunnelTcp(
 	tunService *service.Service,
 	localListeningAddress string,
