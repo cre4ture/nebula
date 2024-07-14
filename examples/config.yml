@@ -371,7 +371,7 @@ firewall:
 
 # by using port tunnels its possible to establish connections into the nebula-network without
 # using a tun/tap device and thus without requiring root access on the host.
-# Port tunnels are currently only supported when setting "tun.disabled" is set to true.
+# Port tunnels are only supported when setting "tun.user" is set to true and thus a user-tun instead of a real one is used.
 port_tunnel:
   udp:
   # format of local and remote address: <host/ip>:<port>

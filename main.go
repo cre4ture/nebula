@@ -13,7 +13,6 @@ import (
 	"github.com/slackhq/nebula/sshd"
 	"github.com/slackhq/nebula/udp"
 	"github.com/slackhq/nebula/util"
-	"golang.org/x/exp/rand"
 	"gopkg.in/yaml.v2"
 )
 
@@ -27,8 +26,6 @@ func Main(c *config.C, configTest bool, buildVersion string, logger *logrus.Logg
 			cancel()
 		}
 	}()
-
-	rand.Seed(uint64(time.Now().UnixNano()))
 
 	l := logger
 	l.Formatter = &logrus.TextFormatter{
