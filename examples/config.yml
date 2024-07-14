@@ -377,17 +377,17 @@ port_tunnel:
   outgoing:
     udp:
     # format of local and remote address: <host/ip>:<port>
-    - local_address: 127.0.0.1:3399
-      remote_address: 192.168.100.92:4499
+    #- local_address: 127.0.0.1:3399
+    #  remote_address: 192.168.100.92:4499
     tcp:
     # format of local and remote address: <host/ip>:<port>
-    - local_address: 127.0.0.1:3399
-      remote_address: 192.168.100.92:4499
+    #- local_address: 127.0.0.1:3399
+    #  remote_address: 192.168.100.92:4499
   ingoing:
     udp:
     # format of forward_address: <host/ip>:<port>
-    - port: 5599
-      forward_address: 127.0.0.1:5599
-    tcp:
-    - port: 5599
-      forward_address: 127.0.0.1:5599
+    #- port: 5599
+    #  forward_address: 127.0.0.1:5599
+    #tcp:
+    #- port: 5599
+    #  forward_address: 127.0.0.1:5599
