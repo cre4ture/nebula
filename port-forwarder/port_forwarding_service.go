@@ -11,6 +11,7 @@ import (
 	"github.com/slackhq/nebula/config"
 	"github.com/slackhq/nebula/service"
 	"golang.org/x/sync/errgroup"
+	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 )
 
 type PortTunnelUdp struct {
@@ -158,6 +159,7 @@ func setupPortTunnelUdp(
 func (pt *PortTunnelUdp) listenLocalPort() error {
 	outsideReaderGroup := errgroup.Group{}
 	outsidePortReaders := make(map[string]interface{})
+	remoteConnections := make(map[string]*gonet.UDPConn)
 	var buf [512 * 1024]byte
 	for {
 		pt.l.Debug("listening on local UDP port ...")
@@ -169,9 +171,14 @@ func (pt *PortTunnelUdp) listenLocalPort() error {
 
 		pt.l.Debugf("handling message from local UDP port: %v", localSourceAddr)
 
-		remoteConnection, err := pt.tunService.DialUDP(pt.remoteUdpAddr.AddrPort().String())
-		if err != nil {
-			return err
+		remoteConnection, ok := remoteConnections[localSourceAddr.String()]
+		if !ok {
+			newRemoteConn, err := pt.tunService.DialUDP(pt.remoteUdpAddr.AddrPort().String())
+			if err != nil {
+				return err
+			}
+			remoteConnection = newRemoteConn
+			remoteConnections[localSourceAddr.String()] = newRemoteConn
 		}
 
 		remoteConnection.Write(buf[:n])
@@ -179,7 +186,7 @@ func (pt *PortTunnelUdp) listenLocalPort() error {
 		pt.l.Debugf("send message from %+v, to: %+v, payload-size: %d",
 			localSourceAddr, pt.remoteUdpAddr, n)
 
-		_, ok := outsidePortReaders[remoteConnection.LocalAddr().String()]
+		_, ok = outsidePortReaders[remoteConnection.LocalAddr().String()]
 		if !ok {
 			outsideReaderGroup.Go(func() error {
 				myLocalSourceAddr := localSourceAddr
