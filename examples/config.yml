@@ -373,7 +373,20 @@ firewall:
 # using a tun/tap device and thus without requiring root access on the host.
 # Port tunnels are only supported when setting "tun.user" is set to true and thus a user-tun instead of a real one is used.
 port_tunnel:
-  udp:
-  # format of local and remote address: <host/ip>:<port>
-  - local_address: 127.0.0.1:3399
-    remote_address: 192.168.100.10:4499
+  outgoing:
+    udp:
+    # format of local and remote address: <host/ip>:<port>
+    - local_address: 127.0.0.1:3399
+      remote_address: 192.168.100.92:4499
+    tcp:
+    # format of local and remote address: <host/ip>:<port>
+    - local_address: 127.0.0.1:3399
+      remote_address: 192.168.100.92:4499
+  ingoing:
+    udp:
+    # format of forward_address: <host/ip>:<port>
+    - port: 5599
+      forward_address: 127.0.0.1:5599
+    tcp:
+    - port: 5599
+      forward_address: 127.0.0.1:5599

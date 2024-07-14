@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -35,18 +36,25 @@ type tunnelConfigOutgoing struct {
 	remoteConnect string
 }
 
+type tunnelConfigIngoing struct {
+	port                uint32
+	forwardLocalAddress string
+}
+
 type PortForwardingService struct {
 	l          *logrus.Logger
 	tunService *service.Service
 
 	configPortTunnelsUdpOutgoing []tunnelConfigOutgoing
 	configPortTunnelsTcpOutgoing []tunnelConfigOutgoing
+	configPortTunnelsUdpIngoing  []tunnelConfigIngoing
+	configPortTunnelsTcpIngoing  []tunnelConfigIngoing
 
 	portTunnelsUdp map[uint32]*PortTunnelUdp
 	portTunnelsTcp map[uint32]*PortTunnelTcp
 }
 
-func convertToPortTunnelConfig(_ *logrus.Logger, p interface{}) (tunnelConfigOutgoing, error) {
+func convertToTunnelConfigOutgoing(_ *logrus.Logger, p interface{}) (tunnelConfigOutgoing, error) {
 	fwd_tunnel := tunnelConfigOutgoing{}
 
 	m, ok := p.(map[interface{}]interface{})
@@ -68,8 +76,34 @@ func convertToPortTunnelConfig(_ *logrus.Logger, p interface{}) (tunnelConfigOut
 	return fwd_tunnel, nil
 }
 
-func (pfService *PortForwardingService) readPortTunnelRulesFromConfig(c *config.C, protocol string) ([]tunnelConfigOutgoing, error) {
-	table := "port_tunnel." + protocol
+func convertToTunnelConfigIngoing(_ *logrus.Logger, p interface{}) (tunnelConfigIngoing, error) {
+	fwd_tunnel := tunnelConfigIngoing{}
+
+	m, ok := p.(map[interface{}]interface{})
+	if !ok {
+		return fwd_tunnel, errors.New("could not parse tunnel config")
+	}
+
+	toString := func(k string, m map[interface{}]interface{}) string {
+		v, ok := m[k]
+		if !ok {
+			return ""
+		}
+		return fmt.Sprintf("%v", v)
+	}
+
+	v, err := strconv.ParseUint(toString("port", m), 10, 32)
+	if err != nil {
+		return fwd_tunnel, err
+	}
+	fwd_tunnel.port = uint32(v)
+	fwd_tunnel.forwardLocalAddress = toString("forward_address", m)
+
+	return fwd_tunnel, nil
+}
+
+func (pfService *PortForwardingService) readOutgoingForwardingRulesFromConfig(c *config.C, protocol string) ([]tunnelConfigOutgoing, error) {
+	table := "port_tunnel.outgoing." + protocol
 	out := make([]tunnelConfigOutgoing, 0)
 
 	r := c.Get(table)
@@ -83,7 +117,32 @@ func (pfService *PortForwardingService) readPortTunnelRulesFromConfig(c *config.
 	}
 
 	for i, t := range rs {
-		portTunnelConfig, err := convertToPortTunnelConfig(pfService.l, t)
+		portTunnelConfig, err := convertToTunnelConfigOutgoing(pfService.l, t)
+		if err != nil {
+			return nil, fmt.Errorf("%s port tunnel #%v; %s", table, i, err)
+		}
+		out = append(out, portTunnelConfig)
+	}
+
+	return out, nil
+}
+
+func (pfService *PortForwardingService) readIngoingForwardingRulesFromConfig(c *config.C, protocol string) ([]tunnelConfigIngoing, error) {
+	table := "port_tunnel.ingoing." + protocol
+	out := make([]tunnelConfigIngoing, 0)
+
+	r := c.Get(table)
+	if r == nil {
+		return nil, nil
+	}
+
+	rs, ok := r.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("%s failed to parse, should be an array of port tunnels", table)
+	}
+
+	for i, t := range rs {
+		portTunnelConfig, err := convertToTunnelConfigIngoing(pfService.l, t)
 		if err != nil {
 			return nil, fmt.Errorf("%s port tunnel #%v; %s", table, i, err)
 		}
@@ -104,18 +163,26 @@ func ConstructFromConfig(
 		tunService: tunService,
 	}
 
-	udp, err := pfService.readPortTunnelRulesFromConfig(c, "udp")
+	var err error
+	pfService.configPortTunnelsUdpOutgoing, err = pfService.readOutgoingForwardingRulesFromConfig(c, "udp")
 	if err != nil {
 		return nil, err
 	}
 
-	tcp, err := pfService.readPortTunnelRulesFromConfig(c, "tcp")
+	pfService.configPortTunnelsTcpOutgoing, err = pfService.readOutgoingForwardingRulesFromConfig(c, "tcp")
 	if err != nil {
 		return nil, err
 	}
 
-	pfService.configPortTunnelsUdpOutgoing = udp
-	pfService.configPortTunnelsTcpOutgoing = tcp
+	pfService.configPortTunnelsUdpIngoing, err = pfService.readIngoingForwardingRulesFromConfig(c, "udp")
+	if err != nil {
+		return nil, err
+	}
+
+	pfService.configPortTunnelsTcpIngoing, err = pfService.readIngoingForwardingRulesFromConfig(c, "tcp")
+	if err != nil {
+		return nil, err
+	}
 
 	return pfService, nil
 }
