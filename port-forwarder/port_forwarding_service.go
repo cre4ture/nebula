@@ -30,24 +30,24 @@ type PortTunnelTcp struct {
 	remoteTcpAddr         *net.TCPAddr
 }
 
-type tunnelConfig struct {
-	local  string
-	remote string
+type tunnelConfigOutgoing struct {
+	localListen   string
+	remoteConnect string
 }
 
 type PortForwardingService struct {
 	l          *logrus.Logger
 	tunService *service.Service
 
-	configPortTunnelsUdp []tunnelConfig
-	configPortTunnelsTcp []tunnelConfig
+	configPortTunnelsUdpOutgoing []tunnelConfigOutgoing
+	configPortTunnelsTcpOutgoing []tunnelConfigOutgoing
 
 	portTunnelsUdp map[uint32]*PortTunnelUdp
 	portTunnelsTcp map[uint32]*PortTunnelTcp
 }
 
-func convertToPortTunnelConfig(_ *logrus.Logger, p interface{}) (tunnelConfig, error) {
-	fwd_tunnel := tunnelConfig{}
+func convertToPortTunnelConfig(_ *logrus.Logger, p interface{}) (tunnelConfigOutgoing, error) {
+	fwd_tunnel := tunnelConfigOutgoing{}
 
 	m, ok := p.(map[interface{}]interface{})
 	if !ok {
@@ -62,15 +62,15 @@ func convertToPortTunnelConfig(_ *logrus.Logger, p interface{}) (tunnelConfig, e
 		return fmt.Sprintf("%v", v)
 	}
 
-	fwd_tunnel.local = toString("local_address", m)
-	fwd_tunnel.remote = toString("remote_address", m)
+	fwd_tunnel.localListen = toString("local_address", m)
+	fwd_tunnel.remoteConnect = toString("remote_address", m)
 
 	return fwd_tunnel, nil
 }
 
-func (pfService *PortForwardingService) readPortTunnelRulesFromConfig(c *config.C, protocol string) ([]tunnelConfig, error) {
+func (pfService *PortForwardingService) readPortTunnelRulesFromConfig(c *config.C, protocol string) ([]tunnelConfigOutgoing, error) {
 	table := "port_tunnel." + protocol
-	out := make([]tunnelConfig, 0)
+	out := make([]tunnelConfigOutgoing, 0)
 
 	r := c.Get(table)
 	if r == nil {
@@ -114,8 +114,8 @@ func ConstructFromConfig(
 		return nil, err
 	}
 
-	pfService.configPortTunnelsUdp = udp
-	pfService.configPortTunnelsTcp = tcp
+	pfService.configPortTunnelsUdpOutgoing = udp
+	pfService.configPortTunnelsTcpOutgoing = tcp
 
 	return pfService, nil
 }
@@ -325,11 +325,11 @@ func (pt *PortTunnelTcp) handleClientConnection_intern(localConnection *net.TCPC
 func (t *PortForwardingService) Activate() error {
 
 	t.portTunnelsUdp = make(map[uint32]*PortTunnelUdp)
-	for id, config := range t.configPortTunnelsUdp {
+	for id, config := range t.configPortTunnelsUdpOutgoing {
 		tunnel, err := setupPortTunnelUdp(
 			t.tunService,
-			config.local,
-			config.remote,
+			config.localListen,
+			config.remoteConnect,
 			t.l,
 		)
 		if err != nil {
@@ -339,11 +339,11 @@ func (t *PortForwardingService) Activate() error {
 	}
 
 	t.portTunnelsTcp = make(map[uint32]*PortTunnelTcp)
-	for id, config := range t.configPortTunnelsTcp {
+	for id, config := range t.configPortTunnelsTcpOutgoing {
 		tunnel, err := setupPortTunnelTcp(
 			t.tunService,
-			config.local,
-			config.remote,
+			config.localListen,
+			config.remoteConnect,
 			t.l,
 		)
 		if err != nil {
