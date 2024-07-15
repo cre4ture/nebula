@@ -18,17 +18,15 @@ import (
 type PortTunnelOutgoingUdp struct {
 	l                     *logrus.Logger
 	tunService            *service.Service
-	localUdpListenAddr    *net.UDPAddr
-	remoteUdpAddr         *net.UDPAddr
+	cfg                   tunnelConfigOutgoing
 	localListenConnection *net.UDPConn
 }
 
 type PortTunnelOutgoingTcp struct {
 	l                     *logrus.Logger
 	tunService            *service.Service
-	localTcpListenAddr    *net.TCPAddr
+	cfg                   tunnelConfigOutgoing
 	localListenConnection *net.TCPListener
-	remoteTcpAddr         *net.TCPAddr
 }
 
 type PortTunnelIngoingUdp struct {
@@ -228,8 +226,7 @@ func setupPortTunnelUdpOut(
 	tunnel := &PortTunnelOutgoingUdp{
 		l:                     l,
 		tunService:            tunService,
-		localUdpListenAddr:    localUdpListenAddr,
-		remoteUdpAddr:         remoteUdpAddr,
+		cfg:                   cfg,
 		localListenConnection: localListenConnection,
 	}
 
@@ -339,7 +336,7 @@ func (pt *PortTunnelOutgoingUdp) listenLocalPort() error {
 
 		remoteConnection, ok := remoteConnections[localSourceAddr.String()]
 		if !ok {
-			newRemoteConn, err := pt.tunService.DialUDP(pt.remoteUdpAddr.AddrPort().String())
+			newRemoteConn, err := pt.tunService.DialUDP(pt.cfg.remoteConnect)
 			if err != nil {
 				return err
 			}
@@ -350,7 +347,7 @@ func (pt *PortTunnelOutgoingUdp) listenLocalPort() error {
 		remoteConnection.Write(buf[:n])
 
 		pt.l.Debugf("send message from %+v, to: %+v, payload-size: %d",
-			localSourceAddr, pt.remoteUdpAddr, n)
+			localSourceAddr, remoteConnection.RemoteAddr().String(), n)
 
 		_, ok = outsidePortReaders[remoteConnection.LocalAddr().String()]
 		if !ok {
@@ -443,9 +440,8 @@ func setupPortTunnelTcpOut(
 	tunnel := &PortTunnelOutgoingTcp{
 		l:                     l,
 		tunService:            tunService,
-		localTcpListenAddr:    localTcpListenAddr,
+		cfg:                   cf,
 		localListenConnection: localListenPort,
-		remoteTcpAddr:         remoteTcpAddr,
 	}
 
 	go tunnel.acceptOnLocalListenPort()
@@ -477,7 +473,7 @@ func (pt *PortTunnelOutgoingTcp) handleClientConnection(localConnection *net.TCP
 
 func (pt *PortTunnelOutgoingTcp) handleClientConnection_intern(localConnection net.Conn) error {
 
-	remoteConnection, err := pt.tunService.DialContext(context.Background(), "tcp", pt.remoteTcpAddr.String())
+	remoteConnection, err := pt.tunService.DialContext(context.Background(), "tcp", pt.cfg.remoteConnect)
 	if err != nil {
 		return err
 	}
@@ -562,7 +558,7 @@ func (t *PortForwardingService) Activate() error {
 		if err != nil {
 			t.l.Errorf("failed to setup UDP-out port tunnel(%d): %+v", id, config)
 		}
-		t.portTunnelsUdpOutgoing[uint32(tunnel.localUdpListenAddr.Port)] = tunnel
+		t.portTunnelsUdpOutgoing[uint32(id)] = tunnel
 	}
 
 	t.portTunnelsTcpOutgoing = make(map[uint32]*PortTunnelOutgoingTcp)
@@ -571,7 +567,7 @@ func (t *PortForwardingService) Activate() error {
 		if err != nil {
 			t.l.Errorf("failed to setup TCP-out port tunnel(%d): %+v", id, config)
 		}
-		t.portTunnelsTcpOutgoing[uint32(tunnel.localTcpListenAddr.Port)] = tunnel
+		t.portTunnelsTcpOutgoing[uint32(id)] = tunnel
 	}
 
 	t.portTunnelsUdpIngoing = make(map[uint32]*PortTunnelIngoingUdp)
