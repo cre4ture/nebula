@@ -68,21 +68,21 @@ func main() {
 	if userspace_tun {
 		if *configTest {
 			util.LogWithContextIfNeeded("Failed to start",
-				errors.New("config test currently not supported for user-tun"),
-				l)
+				errors.New("config test currently not supported for user-tun"), l)
+			os.Exit(1)
 		}
 
 		service, err := service.New(c)
 		if err != nil {
 			util.LogWithContextIfNeeded("Failed to start", err, l)
-			return
+			os.Exit(1)
 		}
 
 		// initialize port forwarding:
 		pf_service, err := port_forwarder.ConstructFromConfig(service, l, c)
 		if err != nil {
 			util.LogWithContextIfNeeded("Failed to start", err, l)
-			return
+			os.Exit(1)
 		}
 		pf_service.Activate()
 
