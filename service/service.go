@@ -174,7 +174,6 @@ func (s *Service) DialContext(ctx context.Context, network, address string) (net
 	return gonet.DialContextTCP(ctx, s.ipstack, fullAddr, ipv4.ProtocolNumber)
 }
 
-// DialContext dials the provided address. Currently only TCP is supported.
 func (s *Service) DialUDP(address string) (*gonet.UDPConn, error) {
 	addr, err := net.ResolveUDPAddr("udp", address)
 	if err != nil {
