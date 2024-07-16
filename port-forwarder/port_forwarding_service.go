@@ -364,7 +364,8 @@ func (pt *PortTunnelOutgoingTcp) acceptOnLocalListenPort() error {
 func (pt *PortTunnelOutgoingTcp) handleClientConnection(localConnection *net.TCPConn) {
 	err := pt.handleClientConnection_intern(localConnection)
 	if err != nil {
-		pt.l.Infof("Closed TCP client connection. Err: %v", err)
+		pt.l.Debugf("Closed TCP client connection %s. Err: %v",
+			localConnection.LocalAddr().String(), err)
 	}
 }
 
@@ -383,14 +384,18 @@ func handleTcpClientConnection_generic(l *logrus.Logger, connA, connB net.Conn) 
 
 	dataTransferHandler := func(from, to net.Conn) error {
 
-		defer cancel()
+		name := fmt.Sprintf("%s -> %s", from.LocalAddr().String(), to.LocalAddr().String())
+
 		defer from.Close()
 		defer to.Close()
+		defer cancel()
+		// give communication in opposite direction time to finish as well
+		defer time.Sleep(time.Millisecond * 300)
 
 		// no write/read timeout
 		to.SetDeadline(time.Time{})
 		from.SetDeadline(time.Time{})
-		buf := make([]byte, 2*(1<<16))
+		buf := make([]byte, 1*(1<<20))
 		for {
 			select {
 			case <-dataTransferCtx.Done():
@@ -398,18 +403,19 @@ func handleTcpClientConnection_generic(l *logrus.Logger, connA, connB net.Conn) 
 			default:
 			}
 
-			rn, err := from.Read(buf)
-			if rn == 0 && (err != nil) {
-				l.Infof("reading from from-connection failed: %v", err)
-				return err
-			}
+			rn, r_err := from.Read(buf)
+			l.Tracef("%s read(%d), err: %v", name, rn, r_err)
 			for i := 0; i < rn; {
-				wn, err := to.Write(buf[i:rn])
-				if err != nil {
-					l.Infof("writing to to-connection failed: %v", err)
-					return err
+				wn, w_err := to.Write(buf[i:rn])
+				if w_err != nil {
+					l.Debugf("%s writing(%d) to to-connection failed: %v", name, rn, w_err)
+					return w_err
 				}
 				i += wn
+			}
+			if r_err != nil {
+				l.Debugf("%s reading(%d) from from-connection failed: %v", name, rn, r_err)
+				return r_err
 			}
 		}
 	}
@@ -473,7 +479,8 @@ func (pt *PortTunnelIngoingTcp) acceptOnOutsideListenPort() error {
 func (pt *PortTunnelIngoingTcp) handleClientConnection(localConnection net.Conn) {
 	err := pt.handleClientConnection_intern(localConnection)
 	if err != nil {
-		pt.l.Infof("Closed TCP client connection. Err: %v", err)
+		pt.l.Debugf("Closed TCP client connection %s. Err: %v",
+			localConnection.LocalAddr().String(), err)
 	}
 }
 
