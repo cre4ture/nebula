@@ -98,12 +98,16 @@ func (pt *PortTunnelOutgoingUdp) listenLocalPort() error {
 	closedConnections := make(chan string)
 	var buf [512 * 1024]byte
 	for {
-		select {
-		case closedOne := <-closedConnections:
-			pt.l.Debugf("closing connection to %s", closedOne)
-			delete(remoteConnections, closedOne)
-			delete(outsidePortReaders, closedOne)
-		default:
+	cleanup:
+		for {
+			select {
+			case closedOne := <-closedConnections:
+				pt.l.Debugf("closing connection to %s", closedOne)
+				delete(remoteConnections, closedOne)
+				delete(outsidePortReaders, closedOne)
+			default:
+				break cleanup
+			}
 		}
 
 		pt.l.Debug("listening on local UDP port ...")
