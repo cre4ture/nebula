@@ -41,20 +41,22 @@ func (tc *TimeoutCounter) IsTimeout() bool {
 	return tc.counter.Load() > tc.threshold
 }
 
-type PortTunnelOutgoingUdp struct {
-	l                     *logrus.Logger
-	tunService            *service.Service
-	cfg                   tunnelConfigOutgoing
-	localListenConnection *net.UDPConn
+type TimedConnection struct {
+	connection      *gonet.UDPConn
+	timeout_counter TimeoutCounter
 }
 
 // use UDP timeout of 300 seconds according to
 // https://support.goto.com/connect/help/what-are-the-recommended-nat-keep-alive-settings
 var UDP_CONNECTION_TIMEOUT_SECONDS uint64 = 300
 
-type TimedConnection struct {
-	connection      *gonet.UDPConn
-	timeout_counter TimeoutCounter
+type PortTunnelOutgoingUdp struct {
+	l          *logrus.Logger
+	tunService *service.Service
+	cfg        tunnelConfigOutgoing
+	// net.Conn is thread-safe according to: https://pkg.go.dev/net#Conn
+	// no need for localListenConnection to protect by mutex
+	localListenConnection *net.UDPConn
 }
 
 func setupPortTunnelUdpOut(
@@ -182,18 +184,102 @@ func (pt *PortTunnelOutgoingUdp) listenLocalPort() error {
 	}
 }
 
-type PortTunnelOutgoingTcp struct {
-	l                     *logrus.Logger
-	tunService            *service.Service
-	cfg                   tunnelConfigOutgoing
-	localListenConnection *net.TCPListener
-}
-
 type PortTunnelIngoingUdp struct {
 	l                       *logrus.Logger
 	tunService              *service.Service
 	cfg                     tunnelConfigIngoing
 	outsideListenConnection *gonet.UDPConn
+}
+
+func setupPortTunnelUdpIn(
+	tunService *service.Service,
+	cfg tunnelConfigIngoing,
+	l *logrus.Logger,
+) (*PortTunnelIngoingUdp, error) {
+
+	conn, err := tunService.ListenUDP(fmt.Sprintf(":%d", cfg.port))
+	if err != nil {
+		return nil, err
+	}
+
+	l.Infof("UDP port tunnel to '%v': listening on outside UDP addr: ':%d'",
+		conn.RemoteAddr(), cfg.port)
+
+	tunnel := &PortTunnelIngoingUdp{
+		l:                       l,
+		tunService:              tunService,
+		cfg:                     cfg,
+		outsideListenConnection: conn,
+	}
+
+	go tunnel.listenLocalOutsidePort()
+
+	return tunnel, nil
+}
+
+func (pt *PortTunnelIngoingUdp) listenLocalOutsidePort() error {
+	insideReaderGroup := errgroup.Group{}
+	insidePortReaders := make(map[string]interface{})
+	remoteConnections := make(map[string]*net.UDPConn)
+	var buf [512 * 1024]byte
+	for {
+		pt.l.Debug("listening on local outside UDP port ...")
+		n, outsideSourceAddr, err := pt.outsideListenConnection.ReadFrom(buf[0:])
+		if err != nil {
+			fmt.Println(err)
+			return err
+		}
+
+		pt.l.Debugf("handling message from local outside UDP port: %v", outsideSourceAddr)
+
+		remoteConnection, ok := remoteConnections[outsideSourceAddr.String()]
+		if !ok {
+			fwdAddr, err := net.ResolveUDPAddr("udp", pt.cfg.forwardLocalAddress)
+			if err != nil {
+				return err
+			}
+			newRemoteConn, err := net.DialUDP("udp", nil, fwdAddr)
+			if err != nil {
+				return err
+			}
+			remoteConnection = newRemoteConn
+			remoteConnections[outsideSourceAddr.String()] = newRemoteConn
+		}
+
+		remoteConnection.Write(buf[:n])
+
+		pt.l.Debugf("send message from %+v, to: %+v, payload-size: %d",
+			outsideSourceAddr, remoteConnection, n)
+
+		_, ok = insidePortReaders[remoteConnection.LocalAddr().String()]
+		if !ok {
+			insideReaderGroup.Go(func() error {
+				myOutsideSourceAddr := outsideSourceAddr
+				remoteConnection.SetDeadline(time.Time{})
+				buf := make([]byte, 2*(1<<16))
+				for {
+					n, err = remoteConnection.Read(buf)
+					if n == 0 && (err != nil) {
+						pt.l.Debugf("finish reading from local UDP remote. local read failed: err: %v", err)
+						return err
+					}
+
+					n, err = pt.outsideListenConnection.WriteTo(buf[:n], myOutsideSourceAddr)
+					if n == 0 && (err != nil) {
+						pt.l.Debugf("finish reading from local UDP remote. write failed: err: %v", err)
+						return err
+					}
+				}
+			})
+		}
+	}
+}
+
+type PortTunnelOutgoingTcp struct {
+	l                     *logrus.Logger
+	tunService            *service.Service
+	cfg                   tunnelConfigOutgoing
+	localListenConnection *net.TCPListener
 }
 
 type PortTunnelIngoingTcp struct {
@@ -359,90 +445,6 @@ func ConstructFromConfig(
 	}
 
 	return pfService, nil
-}
-
-func setupPortTunnelUdpIn(
-	tunService *service.Service,
-	cfg tunnelConfigIngoing,
-	l *logrus.Logger,
-) (*PortTunnelIngoingUdp, error) {
-
-	conn, err := tunService.ListenUDP(fmt.Sprintf(":%d", cfg.port))
-	if err != nil {
-		return nil, err
-	}
-
-	l.Infof("UDP port tunnel to '%v': listening on outside UDP addr: ':%d'",
-		conn.RemoteAddr(), cfg.port)
-
-	tunnel := &PortTunnelIngoingUdp{
-		l:                       l,
-		tunService:              tunService,
-		cfg:                     cfg,
-		outsideListenConnection: conn,
-	}
-
-	go tunnel.listenLocalOutsidePort()
-
-	return tunnel, nil
-}
-
-func (pt *PortTunnelIngoingUdp) listenLocalOutsidePort() error {
-	insideReaderGroup := errgroup.Group{}
-	insidePortReaders := make(map[string]interface{})
-	remoteConnections := make(map[string]*net.UDPConn)
-	var buf [512 * 1024]byte
-	for {
-		pt.l.Debug("listening on local outside UDP port ...")
-		n, outsideSourceAddr, err := pt.outsideListenConnection.ReadFrom(buf[0:])
-		if err != nil {
-			fmt.Println(err)
-			return err
-		}
-
-		pt.l.Debugf("handling message from local outside UDP port: %v", outsideSourceAddr)
-
-		remoteConnection, ok := remoteConnections[outsideSourceAddr.String()]
-		if !ok {
-			fwdAddr, err := net.ResolveUDPAddr("udp", pt.cfg.forwardLocalAddress)
-			if err != nil {
-				return err
-			}
-			newRemoteConn, err := net.DialUDP("udp", nil, fwdAddr)
-			if err != nil {
-				return err
-			}
-			remoteConnection = newRemoteConn
-			remoteConnections[outsideSourceAddr.String()] = newRemoteConn
-		}
-
-		remoteConnection.Write(buf[:n])
-
-		pt.l.Debugf("send message from %+v, to: %+v, payload-size: %d",
-			outsideSourceAddr, remoteConnection, n)
-
-		_, ok = insidePortReaders[remoteConnection.LocalAddr().String()]
-		if !ok {
-			insideReaderGroup.Go(func() error {
-				myOutsideSourceAddr := outsideSourceAddr
-				remoteConnection.SetDeadline(time.Time{})
-				buf := make([]byte, 2*(1<<16))
-				for {
-					n, err = remoteConnection.Read(buf)
-					if n == 0 && (err != nil) {
-						pt.l.Debugf("finish reading from local UDP remote. local read failed: err: %v", err)
-						return err
-					}
-
-					n, err = pt.outsideListenConnection.WriteTo(buf[:n], myOutsideSourceAddr)
-					if n == 0 && (err != nil) {
-						pt.l.Debugf("finish reading from local UDP remote. write failed: err: %v", err)
-						return err
-					}
-				}
-			})
-		}
-	}
 }
 
 func setupPortTunnelTcpIn(
