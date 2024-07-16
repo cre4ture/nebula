@@ -239,7 +239,7 @@ func setupPortTunnelUdpIn(
 	}
 
 	l.Infof("UDP port tunnel to '%v': listening on outside UDP addr: ':%d'",
-		conn.RemoteAddr(), cfg.port)
+		cfg.forwardLocalAddress, cfg.port)
 
 	tunnel := &PortTunnelIngoingUdp{
 		l:                       l,
