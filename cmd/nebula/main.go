@@ -30,7 +30,6 @@ func main() {
 	configTest := flag.Bool("test", false, "Test the config and print the end result. Non zero exit indicates a faulty config")
 	printVersion := flag.Bool("version", false, "Print version")
 	printUsage := flag.Bool("help", false, "Print command line usage")
-	logLevel := flag.String("log-level", "", "log level to activate")
 
 	flag.Parse()
 
@@ -52,14 +51,6 @@ func main() {
 
 	l := logrus.New()
 	l.Out = os.Stdout
-	if len(*logLevel) > 0 {
-		level, err := logrus.ParseLevel(*logLevel)
-		if err != nil {
-			fmt.Printf("failed to get log level from argument: %s", err)
-			os.Exit(1)
-		}
-		l.SetLevel(level)
-	}
 
 	c := config.NewC(l)
 	err := c.Load(*configPath)
@@ -76,7 +67,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		service, err := service.New(c)
+		service, err := service.New(c, l)
 		if err != nil {
 			util.LogWithContextIfNeeded("Failed to start", err, l)
 			os.Exit(1)
