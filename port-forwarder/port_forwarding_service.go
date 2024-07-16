@@ -586,7 +586,9 @@ func (t *PortForwardingService) Activate() error {
 	return nil
 }
 
-func (pfService *PortForwardingService) readOutgoingForwardingRulesFromConfig(c *config.C, protocol string) ([]tunnelConfigOutgoing, error) {
+func (pfService *PortForwardingService) readOutgoingForwardingRulesFromConfig(
+	c *config.C, protocol string,
+) ([]tunnelConfigOutgoing, error) {
 	table := "port_tunnel.outgoing." + protocol
 	out := make([]tunnelConfigOutgoing, 0)
 
@@ -611,7 +613,9 @@ func (pfService *PortForwardingService) readOutgoingForwardingRulesFromConfig(c 
 	return out, nil
 }
 
-func (pfService *PortForwardingService) readIngoingForwardingRulesFromConfig(c *config.C, protocol string) ([]tunnelConfigIngoing, error) {
+func (pfService *PortForwardingService) readIngoingForwardingRulesFromConfig(
+	c *config.C, protocol string,
+) ([]tunnelConfigIngoing, error) {
 	table := "port_tunnel.ingoing." + protocol
 	out := make([]tunnelConfigIngoing, 0)
 
