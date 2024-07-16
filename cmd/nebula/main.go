@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -50,15 +52,17 @@ func main() {
 
 	l := logrus.New()
 	l.Out = os.Stdout
-	level, err := logrus.ParseLevel(*logLevel)
-	if err != nil {
-		fmt.Printf("failed to get log level from argument: %s", err)
-		os.Exit(1)
+	if len(*logLevel) > 0 {
+		level, err := logrus.ParseLevel(*logLevel)
+		if err != nil {
+			fmt.Printf("failed to get log level from argument: %s", err)
+			os.Exit(1)
+		}
+		l.SetLevel(level)
 	}
-	l.SetLevel(level)
 
 	c := config.NewC(l)
-	err = c.Load(*configPath)
+	err := c.Load(*configPath)
 	if err != nil {
 		fmt.Printf("failed to load config: %s", err)
 		os.Exit(1)
@@ -95,7 +99,13 @@ func main() {
 		// shutdown:
 		service.Close()
 		if err := service.Wait(); err != nil {
-			util.LogWithContextIfNeeded("Failed to stop", err, l)
+			if errors.Is(err, os.ErrClosed) ||
+				errors.Is(err, io.EOF) ||
+				errors.Is(err, context.Canceled) {
+				l.Debugf("Stop of user-tun service returned: %v", err)
+			} else {
+				util.LogWithContextIfNeeded("Unclean stop", err, l)
+			}
 		}
 
 	} else {

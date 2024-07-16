@@ -383,13 +383,14 @@ func handleTcpClientConnection_generic(l *logrus.Logger, connA, connB net.Conn) 
 
 	dataTransferHandler := func(from, to net.Conn) error {
 
+		defer cancel()
 		defer from.Close()
 		defer to.Close()
 
-		// no write timeout
-		to.SetWriteDeadline(time.Time{})
-		from.SetReadDeadline(time.Time{})
-		buf := make([]byte, 1)
+		// no write/read timeout
+		to.SetDeadline(time.Time{})
+		from.SetDeadline(time.Time{})
+		buf := make([]byte, 2*(1<<16))
 		for {
 			select {
 			case <-dataTransferCtx.Done():
@@ -397,22 +398,18 @@ func handleTcpClientConnection_generic(l *logrus.Logger, connA, connB net.Conn) 
 			default:
 			}
 
-			// short read timeout to be able to forward also short packages
-			//from.SetReadDeadline(time.Now().Add(time.Millisecond * 3))
-			n, err := from.Read(buf)
-			if n == 0 && (err != nil) {
+			rn, err := from.Read(buf)
+			if rn == 0 && (err != nil) {
 				l.Infof("reading from from-connection failed: %v", err)
-				cancel()
 				return err
 			}
-			for i := 0; i < n; {
-				n, err = to.Write(buf[i:n])
+			for i := 0; i < rn; {
+				wn, err := to.Write(buf[i:rn])
 				if err != nil {
 					l.Infof("writing to to-connection failed: %v", err)
-					cancel()
 					return err
 				}
-				i += n
+				i += wn
 			}
 		}
 	}
