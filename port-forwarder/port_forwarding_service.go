@@ -27,18 +27,18 @@ type tunnelConfigIngoing struct {
 }
 
 type TimeoutCounter struct {
-	counter   atomic.Uint64
-	threshold uint64
+	counter   atomic.Uint32
+	threshold uint32
 }
 
-func NewTimeoutCounter(threshold uint64) TimeoutCounter {
+func NewTimeoutCounter(threshold uint32) TimeoutCounter {
 	return TimeoutCounter{
-		counter:   atomic.Uint64{},
+		counter:   atomic.Uint32{},
 		threshold: threshold,
 	}
 }
 
-func (tc *TimeoutCounter) Increment(step uint64) bool {
+func (tc *TimeoutCounter) Increment(step uint32) bool {
 	tc.counter.Add(step)
 	return tc.IsTimeout()
 }
@@ -58,7 +58,7 @@ type TimedConnection[C any] struct {
 
 // use UDP timeout of 300 seconds according to
 // https://support.goto.com/connect/help/what-are-the-recommended-nat-keep-alive-settings
-var UDP_CONNECTION_TIMEOUT_SECONDS uint64 = 300
+var UDP_CONNECTION_TIMEOUT_SECONDS uint32 = 300
 
 type udpConnInterface interface {
 	WriteTo(b []byte, addr net.Addr) (int, error)
