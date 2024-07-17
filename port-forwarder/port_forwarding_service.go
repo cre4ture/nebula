@@ -593,7 +593,7 @@ func (t *PortForwardingService) Activate() error {
 func (pfService *PortForwardingService) readOutgoingForwardingRulesFromConfig(
 	c *config.C, protocol string,
 ) ([]tunnelConfigOutgoing, error) {
-	table := "port_tunnel.outgoing." + protocol
+	table := "port_forwarding.outgoing." + protocol
 	out := make([]tunnelConfigOutgoing, 0)
 
 	r := c.Get(table)
@@ -620,7 +620,7 @@ func (pfService *PortForwardingService) readOutgoingForwardingRulesFromConfig(
 func (pfService *PortForwardingService) readIngoingForwardingRulesFromConfig(
 	c *config.C, protocol string,
 ) ([]tunnelConfigIngoing, error) {
-	table := "port_tunnel.ingoing." + protocol
+	table := "port_forwarding.incoming." + protocol
 	out := make([]tunnelConfigIngoing, 0)
 
 	r := c.Get(table)

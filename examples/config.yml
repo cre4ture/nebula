@@ -373,12 +373,12 @@ firewall:
       group: remote_client
       local_cidr: 192.168.100.1/24
 
-# by using port tunnels/port forwarding its possible to establish connections into the nebula-network without
-# using a tun/tap device and thus without requiring root access on the host.
-# Port tunnels are only supported when setting "tun.user" is set to true and thus
+# by using port port forwarding (port tunnels) its possible to establish connections
+# from/into the nebula-network without using a tun/tap device and thus without requiring root access
+# on the host. port forwarding is only supported when setting "tun.user" is set to true and thus
 # a user-tun instead of a real one is used.
-# IMPORTANT: For ingoing tunnels, don't forget to also open the firewall for the relevant ports.
-port_tunnel:
+# IMPORTANT: For incoming tunnels, don't forget to also open the firewall for the relevant ports.
+port_forwarding:
   outgoing:
     udp:
     # format of local and remote address: <host/ip>:<port>
@@ -388,11 +388,12 @@ port_tunnel:
     # format of local and remote address: <host/ip>:<port>
     #- local_address: 127.0.0.1:3399
     #  remote_address: 192.168.100.92:4499
-  ingoing:
+  incoming:
     udp:
     # format of forward_address: <host/ip>:<port>
     #- port: 5599
     #  forward_address: 127.0.0.1:5599
-    #tcp:
+    tcp:
+    # format of forward_address: <host/ip>:<port>
     #- port: 5599
     #  forward_address: 127.0.0.1:5599
