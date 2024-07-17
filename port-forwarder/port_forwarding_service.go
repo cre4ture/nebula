@@ -16,12 +16,12 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 )
 
-type tunnelConfigOutgoing struct {
+type forwardConfigOutgoing struct {
 	localListen   string
 	remoteConnect string
 }
 
-type tunnelConfigIngoing struct {
+type forwardConfigIncoming struct {
 	port                uint32
 	forwardLocalAddress string
 }
@@ -125,20 +125,20 @@ cleanup:
 	}
 }
 
-type PortTunnelOutgoingUdp struct {
+type PortForwardingOutgoingUdp struct {
 	l          *logrus.Logger
 	tunService *service.Service
-	cfg        tunnelConfigOutgoing
+	cfg        forwardConfigOutgoing
 	// net.Conn is thread-safe according to: https://pkg.go.dev/net#Conn
 	// no need for localListenConnection to protect by mutex
 	localListenConnection *net.UDPConn
 }
 
-func setupPortTunnelUdpOut(
+func setupPortForwardingUdpOut(
 	tunService *service.Service,
-	cfg tunnelConfigOutgoing,
+	cfg forwardConfigOutgoing,
 	l *logrus.Logger,
-) (*PortTunnelOutgoingUdp, error) {
+) (*PortForwardingOutgoingUdp, error) {
 	localUdpListenAddr, err := net.ResolveUDPAddr("udp", cfg.localListen)
 	if err != nil {
 		return nil, err
@@ -153,22 +153,22 @@ func setupPortTunnelUdpOut(
 		return nil, err
 	}
 
-	l.Infof("UDP port tunnel to '%v': listening on local UDP addr: '%v'",
+	l.Infof("UDP port forwarding to '%v': listening on local UDP addr: '%v'",
 		remoteUdpAddr, localUdpListenAddr)
 
-	tunnel := &PortTunnelOutgoingUdp{
+	portForwarding := &PortForwardingOutgoingUdp{
 		l:                     l,
 		tunService:            tunService,
 		cfg:                   cfg,
 		localListenConnection: localListenConnection,
 	}
 
-	go tunnel.listenLocalPort()
+	go portForwarding.listenLocalPort()
 
-	return tunnel, nil
+	return portForwarding, nil
 }
 
-func (pt *PortTunnelOutgoingUdp) listenLocalPort() error {
+func (pt *PortForwardingOutgoingUdp) listenLocalPort() error {
 	outsideReaderGroup := errgroup.Group{}
 	outsidePortReaders := make(map[string]bool)
 	remoteConnections := make(map[string]*TimedConnection[*gonet.UDPConn])
@@ -220,40 +220,40 @@ func (pt *PortTunnelOutgoingUdp) listenLocalPort() error {
 	}
 }
 
-type PortTunnelIngoingUdp struct {
+type PortForwardingIncomingUdp struct {
 	l                       *logrus.Logger
 	tunService              *service.Service
-	cfg                     tunnelConfigIngoing
+	cfg                     forwardConfigIncoming
 	outsideListenConnection *gonet.UDPConn
 }
 
-func setupPortTunnelUdpIn(
+func setupPortForwardingUdpIn(
 	tunService *service.Service,
-	cfg tunnelConfigIngoing,
+	cfg forwardConfigIncoming,
 	l *logrus.Logger,
-) (*PortTunnelIngoingUdp, error) {
+) (*PortForwardingIncomingUdp, error) {
 
 	conn, err := tunService.ListenUDP(fmt.Sprintf(":%d", cfg.port))
 	if err != nil {
 		return nil, err
 	}
 
-	l.Infof("UDP port tunnel to '%v': listening on outside UDP addr: ':%d'",
+	l.Infof("UDP port forwarding to '%v': listening on outside UDP addr: ':%d'",
 		cfg.forwardLocalAddress, cfg.port)
 
-	tunnel := &PortTunnelIngoingUdp{
+	forwarding := &PortForwardingIncomingUdp{
 		l:                       l,
 		tunService:              tunService,
 		cfg:                     cfg,
 		outsideListenConnection: conn,
 	}
 
-	go tunnel.listenLocalOutsidePort()
+	go forwarding.listenLocalOutsidePort()
 
-	return tunnel, nil
+	return forwarding, nil
 }
 
-func (pt *PortTunnelIngoingUdp) listenLocalOutsidePort() error {
+func (pt *PortForwardingIncomingUdp) listenLocalOutsidePort() error {
 	insideReaderGroup := errgroup.Group{}
 	insidePortReaders := make(map[string]bool)
 	remoteConnections := make(map[string]*TimedConnection[*net.UDPConn])
@@ -306,18 +306,18 @@ func (pt *PortTunnelIngoingUdp) listenLocalOutsidePort() error {
 	}
 }
 
-type PortTunnelOutgoingTcp struct {
+type PortForwardingOutgoingTcp struct {
 	l                     *logrus.Logger
 	tunService            *service.Service
-	cfg                   tunnelConfigOutgoing
+	cfg                   forwardConfigOutgoing
 	localListenConnection *net.TCPListener
 }
 
-func setupPortTunnelTcpOut(
+func setupPortForwardingTcpOut(
 	tunService *service.Service,
-	cf tunnelConfigOutgoing,
+	cf forwardConfigOutgoing,
 	l *logrus.Logger,
-) (*PortTunnelOutgoingTcp, error) {
+) (*PortForwardingOutgoingTcp, error) {
 	localTcpListenAddr, err := net.ResolveTCPAddr("tcp", cf.localListen)
 	if err != nil {
 		return nil, err
@@ -331,22 +331,22 @@ func setupPortTunnelTcpOut(
 		return nil, err
 	}
 
-	l.Infof("TCP port tunnel to '%v': listening on local TCP addr: '%v'",
+	l.Infof("TCP port forwarding to '%v': listening on local TCP addr: '%v'",
 		remoteTcpAddr, localTcpListenAddr)
 
-	tunnel := &PortTunnelOutgoingTcp{
+	portForwarding := &PortForwardingOutgoingTcp{
 		l:                     l,
 		tunService:            tunService,
 		cfg:                   cf,
 		localListenConnection: localListenPort,
 	}
 
-	go tunnel.acceptOnLocalListenPort()
+	go portForwarding.acceptOnLocalListenPort()
 
-	return tunnel, nil
+	return portForwarding, nil
 }
 
-func (pt *PortTunnelOutgoingTcp) acceptOnLocalListenPort() error {
+func (pt *PortForwardingOutgoingTcp) acceptOnLocalListenPort() error {
 	for {
 		pt.l.Debug("listening on local TCP port ...")
 		connection, err := pt.localListenConnection.AcceptTCP()
@@ -361,7 +361,7 @@ func (pt *PortTunnelOutgoingTcp) acceptOnLocalListenPort() error {
 	}
 }
 
-func (pt *PortTunnelOutgoingTcp) handleClientConnection(localConnection *net.TCPConn) {
+func (pt *PortForwardingOutgoingTcp) handleClientConnection(localConnection *net.TCPConn) {
 	err := pt.handleClientConnection_intern(localConnection)
 	if err != nil {
 		pt.l.Debugf("Closed TCP client connection %s. Err: %v",
@@ -369,7 +369,7 @@ func (pt *PortTunnelOutgoingTcp) handleClientConnection(localConnection *net.TCP
 	}
 }
 
-func (pt *PortTunnelOutgoingTcp) handleClientConnection_intern(localConnection net.Conn) error {
+func (pt *PortForwardingOutgoingTcp) handleClientConnection_intern(localConnection net.Conn) error {
 
 	remoteConnection, err := pt.tunService.DialContext(context.Background(), "tcp", pt.cfg.remoteConnect)
 	if err != nil {
@@ -428,40 +428,40 @@ func handleTcpClientConnection_generic(l *logrus.Logger, connA, connB net.Conn) 
 	return errGroup.Wait()
 }
 
-type PortTunnelIngoingTcp struct {
+type PortForwardingIncomingTcp struct {
 	l                       *logrus.Logger
 	tunService              *service.Service
-	cfg                     tunnelConfigIngoing
+	cfg                     forwardConfigIncoming
 	outsideListenConnection net.Listener
 }
 
-func setupPortTunnelTcpIn(
+func setupPortForwardingTcpIn(
 	tunService *service.Service,
-	cf tunnelConfigIngoing,
+	cf forwardConfigIncoming,
 	l *logrus.Logger,
-) (*PortTunnelIngoingTcp, error) {
+) (*PortForwardingIncomingTcp, error) {
 
 	listener, err := tunService.Listen("tcp", fmt.Sprintf(":%d", cf.port))
 	if err != nil {
 		return nil, err
 	}
 
-	l.Infof("TCP port tunnel to '%v': listening on local, outside TCP addr: ':%d'",
+	l.Infof("TCP port forwarding to '%v': listening on local, outside TCP addr: ':%d'",
 		cf.forwardLocalAddress, cf.port)
 
-	tunnel := &PortTunnelIngoingTcp{
+	portForwarding := &PortForwardingIncomingTcp{
 		l:                       l,
 		tunService:              tunService,
 		cfg:                     cf,
 		outsideListenConnection: listener,
 	}
 
-	go tunnel.acceptOnOutsideListenPort()
+	go portForwarding.acceptOnOutsideListenPort()
 
-	return tunnel, nil
+	return portForwarding, nil
 }
 
-func (pt *PortTunnelIngoingTcp) acceptOnOutsideListenPort() error {
+func (pt *PortForwardingIncomingTcp) acceptOnOutsideListenPort() error {
 	for {
 		pt.l.Debug("listening on outside TCP port ...")
 		connection, err := pt.outsideListenConnection.Accept()
@@ -476,7 +476,7 @@ func (pt *PortTunnelIngoingTcp) acceptOnOutsideListenPort() error {
 	}
 }
 
-func (pt *PortTunnelIngoingTcp) handleClientConnection(localConnection net.Conn) {
+func (pt *PortForwardingIncomingTcp) handleClientConnection(localConnection net.Conn) {
 	err := pt.handleClientConnection_intern(localConnection)
 	if err != nil {
 		pt.l.Debugf("Closed TCP client connection %s. Err: %v",
@@ -484,7 +484,7 @@ func (pt *PortTunnelIngoingTcp) handleClientConnection(localConnection net.Conn)
 	}
 }
 
-func (pt *PortTunnelIngoingTcp) handleClientConnection_intern(outsideConnection net.Conn) error {
+func (pt *PortForwardingIncomingTcp) handleClientConnection_intern(outsideConnection net.Conn) error {
 
 	fwdAddr, err := net.ResolveTCPAddr("tcp", pt.cfg.forwardLocalAddress)
 	if err != nil {
@@ -503,15 +503,15 @@ type PortForwardingService struct {
 	l          *logrus.Logger
 	tunService *service.Service
 
-	configPortTunnelsUdpOutgoing []tunnelConfigOutgoing
-	configPortTunnelsTcpOutgoing []tunnelConfigOutgoing
-	configPortTunnelsUdpIngoing  []tunnelConfigIngoing
-	configPortTunnelsTcpIngoing  []tunnelConfigIngoing
+	configPortForwardingsUdpOutgoing []forwardConfigOutgoing
+	configPortForwardingsTcpOutgoing []forwardConfigOutgoing
+	configPortForwardingsUdpIncoming []forwardConfigIncoming
+	configPortForwardingsTcpIncoming []forwardConfigIncoming
 
-	portTunnelsUdpOutgoing map[uint32]*PortTunnelOutgoingUdp
-	portTunnelsTcpOutgoing map[uint32]*PortTunnelOutgoingTcp
-	portTunnelsUdpIngoing  map[uint32]*PortTunnelIngoingUdp
-	portTunnelsTcpIngoing  map[uint32]*PortTunnelIngoingTcp
+	portForwardingsUdpOutgoing map[uint32]*PortForwardingOutgoingUdp
+	portForwardingsTcpOutgoing map[uint32]*PortForwardingOutgoingTcp
+	portForwardingsUdpIncoming map[uint32]*PortForwardingIncomingUdp
+	portForwardingsTcpIncoming map[uint32]*PortForwardingIncomingTcp
 }
 
 func ConstructFromConfig(
@@ -526,22 +526,22 @@ func ConstructFromConfig(
 	}
 
 	var err error
-	pfService.configPortTunnelsUdpOutgoing, err = pfService.readOutgoingForwardingRulesFromConfig(c, "udp")
+	pfService.configPortForwardingsUdpOutgoing, err = pfService.readOutgoingForwardingRulesFromConfig(c, "udp")
 	if err != nil {
 		return nil, err
 	}
 
-	pfService.configPortTunnelsTcpOutgoing, err = pfService.readOutgoingForwardingRulesFromConfig(c, "tcp")
+	pfService.configPortForwardingsTcpOutgoing, err = pfService.readOutgoingForwardingRulesFromConfig(c, "tcp")
 	if err != nil {
 		return nil, err
 	}
 
-	pfService.configPortTunnelsUdpIngoing, err = pfService.readIngoingForwardingRulesFromConfig(c, "udp")
+	pfService.configPortForwardingsUdpIncoming, err = pfService.readIncomingForwardingRulesFromConfig(c, "udp")
 	if err != nil {
 		return nil, err
 	}
 
-	pfService.configPortTunnelsTcpIngoing, err = pfService.readIngoingForwardingRulesFromConfig(c, "tcp")
+	pfService.configPortForwardingsTcpIncoming, err = pfService.readIncomingForwardingRulesFromConfig(c, "tcp")
 	if err != nil {
 		return nil, err
 	}
@@ -551,40 +551,40 @@ func ConstructFromConfig(
 
 func (t *PortForwardingService) Activate() error {
 
-	t.portTunnelsUdpOutgoing = make(map[uint32]*PortTunnelOutgoingUdp)
-	for id, config := range t.configPortTunnelsUdpOutgoing {
-		tunnel, err := setupPortTunnelUdpOut(t.tunService, config, t.l)
+	t.portForwardingsUdpOutgoing = make(map[uint32]*PortForwardingOutgoingUdp)
+	for id, config := range t.configPortForwardingsUdpOutgoing {
+		portForwarding, err := setupPortForwardingUdpOut(t.tunService, config, t.l)
 		if err != nil {
-			t.l.Errorf("failed to setup UDP-out port tunnel(%d): %+v", id, config)
+			t.l.Errorf("failed to setup UDP-out port forwarding(%d): %+v", id, config)
 		}
-		t.portTunnelsUdpOutgoing[uint32(id)] = tunnel
+		t.portForwardingsUdpOutgoing[uint32(id)] = portForwarding
 	}
 
-	t.portTunnelsTcpOutgoing = make(map[uint32]*PortTunnelOutgoingTcp)
-	for id, config := range t.configPortTunnelsTcpOutgoing {
-		tunnel, err := setupPortTunnelTcpOut(t.tunService, config, t.l)
+	t.portForwardingsTcpOutgoing = make(map[uint32]*PortForwardingOutgoingTcp)
+	for id, config := range t.configPortForwardingsTcpOutgoing {
+		portForwarding, err := setupPortForwardingTcpOut(t.tunService, config, t.l)
 		if err != nil {
-			t.l.Errorf("failed to setup TCP-out port tunnel(%d): %+v", id, config)
+			t.l.Errorf("failed to setup TCP-out port forwarding(%d): %+v", id, config)
 		}
-		t.portTunnelsTcpOutgoing[uint32(id)] = tunnel
+		t.portForwardingsTcpOutgoing[uint32(id)] = portForwarding
 	}
 
-	t.portTunnelsUdpIngoing = make(map[uint32]*PortTunnelIngoingUdp)
-	for id, config := range t.configPortTunnelsUdpIngoing {
-		tunnel, err := setupPortTunnelUdpIn(t.tunService, config, t.l)
+	t.portForwardingsUdpIncoming = make(map[uint32]*PortForwardingIncomingUdp)
+	for id, config := range t.configPortForwardingsUdpIncoming {
+		portForwarding, err := setupPortForwardingUdpIn(t.tunService, config, t.l)
 		if err != nil {
-			t.l.Errorf("failed to setup UDP-in port tunnel(%d): %+v", id, config)
+			t.l.Errorf("failed to setup UDP-in port forwarding(%d): %+v", id, config)
 		}
-		t.portTunnelsUdpIngoing[uint32(tunnel.cfg.port)] = tunnel
+		t.portForwardingsUdpIncoming[uint32(portForwarding.cfg.port)] = portForwarding
 	}
 
-	t.portTunnelsTcpIngoing = make(map[uint32]*PortTunnelIngoingTcp)
-	for id, config := range t.configPortTunnelsTcpIngoing {
-		tunnel, err := setupPortTunnelTcpIn(t.tunService, config, t.l)
+	t.portForwardingsTcpIncoming = make(map[uint32]*PortForwardingIncomingTcp)
+	for id, config := range t.configPortForwardingsTcpIncoming {
+		portForwardings, err := setupPortForwardingTcpIn(t.tunService, config, t.l)
 		if err != nil {
-			t.l.Errorf("failed to setup TCP-in port tunnel(%d): %+v", id, config)
+			t.l.Errorf("failed to setup TCP-in port forwarding(%d): %+v", id, config)
 		}
-		t.portTunnelsTcpIngoing[uint32(tunnel.cfg.port)] = tunnel
+		t.portForwardingsTcpIncoming[uint32(portForwardings.cfg.port)] = portForwardings
 	}
 
 	return nil
@@ -592,9 +592,9 @@ func (t *PortForwardingService) Activate() error {
 
 func (pfService *PortForwardingService) readOutgoingForwardingRulesFromConfig(
 	c *config.C, protocol string,
-) ([]tunnelConfigOutgoing, error) {
+) ([]forwardConfigOutgoing, error) {
 	table := "port_forwarding.outgoing." + protocol
-	out := make([]tunnelConfigOutgoing, 0)
+	out := make([]forwardConfigOutgoing, 0)
 
 	r := c.Get(table)
 	if r == nil {
@@ -603,25 +603,25 @@ func (pfService *PortForwardingService) readOutgoingForwardingRulesFromConfig(
 
 	rs, ok := r.([]interface{})
 	if !ok {
-		return nil, fmt.Errorf("%s failed to parse, should be an array of port tunnels", table)
+		return nil, fmt.Errorf("%s failed to parse, should be an array of port forwardings", table)
 	}
 
 	for i, t := range rs {
-		portTunnelConfig, err := convertToTunnelConfigOutgoing(pfService.l, t)
+		portForwardingConfig, err := convertToForwardConfigOutgoing(pfService.l, t)
 		if err != nil {
-			return nil, fmt.Errorf("%s port tunnel #%v; %s", table, i, err)
+			return nil, fmt.Errorf("%s port forwarding #%v; %s", table, i, err)
 		}
-		out = append(out, portTunnelConfig)
+		out = append(out, portForwardingConfig)
 	}
 
 	return out, nil
 }
 
-func (pfService *PortForwardingService) readIngoingForwardingRulesFromConfig(
+func (pfService *PortForwardingService) readIncomingForwardingRulesFromConfig(
 	c *config.C, protocol string,
-) ([]tunnelConfigIngoing, error) {
+) ([]forwardConfigIncoming, error) {
 	table := "port_forwarding.incoming." + protocol
-	out := make([]tunnelConfigIngoing, 0)
+	out := make([]forwardConfigIncoming, 0)
 
 	r := c.Get(table)
 	if r == nil {
@@ -630,26 +630,26 @@ func (pfService *PortForwardingService) readIngoingForwardingRulesFromConfig(
 
 	rs, ok := r.([]interface{})
 	if !ok {
-		return nil, fmt.Errorf("%s failed to parse, should be an array of port tunnels", table)
+		return nil, fmt.Errorf("%s failed to parse, should be an array of port forwardings", table)
 	}
 
 	for i, t := range rs {
-		portTunnelConfig, err := convertToTunnelConfigIngoing(pfService.l, t)
+		portForwardingConfig, err := convertToForwardConfigIncoming(pfService.l, t)
 		if err != nil {
-			return nil, fmt.Errorf("%s port tunnel #%v; %s", table, i, err)
+			return nil, fmt.Errorf("%s port forwarding #%v; %s", table, i, err)
 		}
-		out = append(out, portTunnelConfig)
+		out = append(out, portForwardingConfig)
 	}
 
 	return out, nil
 }
 
-func convertToTunnelConfigOutgoing(_ *logrus.Logger, p interface{}) (tunnelConfigOutgoing, error) {
-	fwd_tunnel := tunnelConfigOutgoing{}
+func convertToForwardConfigOutgoing(_ *logrus.Logger, p interface{}) (forwardConfigOutgoing, error) {
+	fwd_port := forwardConfigOutgoing{}
 
 	m, ok := p.(map[interface{}]interface{})
 	if !ok {
-		return fwd_tunnel, errors.New("could not parse tunnel config")
+		return fwd_port, errors.New("could not parse port forwarding config")
 	}
 
 	toString := func(k string, m map[interface{}]interface{}) string {
@@ -660,18 +660,18 @@ func convertToTunnelConfigOutgoing(_ *logrus.Logger, p interface{}) (tunnelConfi
 		return fmt.Sprintf("%v", v)
 	}
 
-	fwd_tunnel.localListen = toString("local_address", m)
-	fwd_tunnel.remoteConnect = toString("remote_address", m)
+	fwd_port.localListen = toString("local_address", m)
+	fwd_port.remoteConnect = toString("remote_address", m)
 
-	return fwd_tunnel, nil
+	return fwd_port, nil
 }
 
-func convertToTunnelConfigIngoing(_ *logrus.Logger, p interface{}) (tunnelConfigIngoing, error) {
-	fwd_tunnel := tunnelConfigIngoing{}
+func convertToForwardConfigIncoming(_ *logrus.Logger, p interface{}) (forwardConfigIncoming, error) {
+	fwd_port := forwardConfigIncoming{}
 
 	m, ok := p.(map[interface{}]interface{})
 	if !ok {
-		return fwd_tunnel, errors.New("could not parse tunnel config")
+		return fwd_port, errors.New("could not parse port forwarding config")
 	}
 
 	toString := func(k string, m map[interface{}]interface{}) string {
@@ -684,10 +684,10 @@ func convertToTunnelConfigIngoing(_ *logrus.Logger, p interface{}) (tunnelConfig
 
 	v, err := strconv.ParseUint(toString("port", m), 10, 32)
 	if err != nil {
-		return fwd_tunnel, err
+		return fwd_port, err
 	}
-	fwd_tunnel.port = uint32(v)
-	fwd_tunnel.forwardLocalAddress = toString("forward_address", m)
+	fwd_port.port = uint32(v)
+	fwd_port.forwardLocalAddress = toString("forward_address", m)
 
-	return fwd_tunnel, nil
+	return fwd_port, nil
 }
