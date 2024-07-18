@@ -3,17 +3,43 @@ package overlay
 import (
 	"io"
 	"net"
+	"sync/atomic"
 
 	"github.com/sirupsen/logrus"
+	"github.com/slackhq/nebula/cidr"
 	"github.com/slackhq/nebula/config"
 	"github.com/slackhq/nebula/iputil"
 )
 
 func NewUserDeviceFromConfig(c *config.C, l *logrus.Logger, tunCidr *net.IPNet, routines int) (Device, error) {
-	return NewUserDevice(tunCidr)
+	d, err := NewUserDevice(tunCidr)
+	if err != nil {
+		return nil, err
+	}
+
+	_, routes, err := getAllRoutesFromConfig(c, tunCidr, true)
+	if err != nil {
+		return nil, err
+	}
+
+	routeTree, err := makeRouteTree(l, routes, true)
+	if err != nil {
+		return nil, err
+	}
+
+	newDefaultMTU := c.GetInt("tun.mtu", DefaultMTU)
+	for i, r := range routes {
+		if r.MTU == 0 {
+			routes[i].MTU = newDefaultMTU
+		}
+	}
+
+	d.routeTree.Store(routeTree)
+
+	return d, nil
 }
 
-func NewUserDevice(tunCidr *net.IPNet) (Device, error) {
+func NewUserDevice(tunCidr *net.IPNet) (*UserDevice, error) {
 	// these pipes guarantee each write/read will match 1:1
 	or, ow := io.Pipe()
 	ir, iw := io.Pipe()
@@ -34,14 +60,19 @@ type UserDevice struct {
 
 	inboundReader *io.PipeReader
 	inboundWriter *io.PipeWriter
+
+	routeTree atomic.Pointer[cidr.Tree4[iputil.VpnIp]]
 }
 
 func (d *UserDevice) Activate() error {
 	return nil
 }
-func (d *UserDevice) Cidr() *net.IPNet                      { return d.tunCidr }
-func (d *UserDevice) Name() string                          { return "faketun0" }
-func (d *UserDevice) RouteFor(ip iputil.VpnIp) iputil.VpnIp { return ip }
+func (d *UserDevice) Cidr() *net.IPNet { return d.tunCidr }
+func (d *UserDevice) Name() string     { return "faketun0" }
+func (d *UserDevice) RouteFor(ip iputil.VpnIp) iputil.VpnIp {
+	_, r := d.routeTree.Load().MostSpecificContains(ip)
+	return r
+}
 func (d *UserDevice) NewMultiQueueReader() (io.ReadWriteCloser, error) {
 	return d, nil
 }
