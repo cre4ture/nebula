@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -16,6 +17,10 @@ import (
 	port_forwarder "github.com/slackhq/nebula/port-forwarder"
 	"github.com/slackhq/nebula/service"
 	"github.com/slackhq/nebula/util"
+
+	_ "net/http/pprof"
+
+	"net/http"
 )
 
 // A version string that can be set with
@@ -26,6 +31,12 @@ import (
 var Build string
 
 func main() {
+
+	// Add this only if needed
+	go func() {
+		log.Println(http.ListenAndServe("localhost:8000", nil))
+	}()
+
 	configPath := flag.String("config", "", "Path to either a file or directory to load configuration from")
 	configTest := flag.Bool("test", false, "Test the config and print the end result. Non zero exit indicates a faulty config")
 	printVersion := flag.Bool("version", false, "Print version")
