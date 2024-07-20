@@ -297,6 +297,7 @@ func (pt *PortForwardingIncomingUdp) listenLocalOutsidePort() error {
 
 		_, ok = insidePortReaders[outsideSourceAddr.String()]
 		if !ok {
+			insidePortReaders[outsideSourceAddr.String()] = true
 			insideReaderGroup.Go(func() error {
 				return handleUdpDestinationPortReading(
 					pt.l, "outside dest", &closedConnections, outsideSourceAddr,
