@@ -61,6 +61,7 @@ func main() {
 
 	userspace_tun := c.GetBool("tun.user", false)
 	if userspace_tun {
+		l.Infof("Configuring userspace-tun instead of kernel tun")
 		if *configTest {
 			util.LogWithContextIfNeeded("Failed to start",
 				errors.New("config test currently not supported for user-tun"), l)
@@ -101,6 +102,7 @@ func main() {
 
 	} else {
 
+		l.Infof("Configuring for kernel tun")
 		ctrl, err := nebula.Main(c, *configTest, Build, l, nil)
 		if err != nil {
 			util.LogWithContextIfNeeded("Failed to start", err, l)

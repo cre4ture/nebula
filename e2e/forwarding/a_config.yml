@@ -10,14 +10,16 @@ listen:
   host: 127.0.0.1
   port: 10001
 
-forwarding:
-  inbound:
-    - listen: ":5201"
-      dial: "127.0.0.1:15001"
-      proto: tcp
+port_forwarding:
+  incoming:
+    tcp:
+      - port: 5201
+        forward_address: "127.0.0.1:15001"
+
 
 tun:
-  disabled: true
+  disabled: false
+  user: true
   mtu: 1300
 
 firewall:
