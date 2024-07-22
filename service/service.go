@@ -67,7 +67,6 @@ func New(config *config.C, logger *logrus.Logger) (*Service, error) {
 		return nil, errors.New("must be using user device")
 	}
 
-	// BOOKMARK: stack is created already here. CAN WE RE_USE IT?
 	s.ipstack = stack.New(stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4, icmp.NewProtocol6},
