@@ -18,8 +18,8 @@ func NewUserDevice(tunCidr *net.IPNet) (Device, error) {
 	// these pipes guarantee each write/read will match 1:1
 	return &UserDevice{
 		tunCidr:         tunCidr,
-		outboundChannel: make(chan *buffer.View),
-		inboundChannel:  make(chan *buffer.View),
+		outboundChannel: make(chan *buffer.View, 16),
+		inboundChannel:  make(chan *buffer.View, 16),
 	}, nil
 }
 
