@@ -7,6 +7,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/slackhq/nebula/config"
 	"github.com/slackhq/nebula/iputil"
+	"gvisor.dev/gvisor/pkg/buffer"
 )
 
 func NewUserDeviceFromConfig(c *config.C, l *logrus.Logger, tunCidr *net.IPNet, routines int) (Device, error) {
@@ -15,25 +16,18 @@ func NewUserDeviceFromConfig(c *config.C, l *logrus.Logger, tunCidr *net.IPNet, 
 
 func NewUserDevice(tunCidr *net.IPNet) (Device, error) {
 	// these pipes guarantee each write/read will match 1:1
-	or, ow := io.Pipe()
-	ir, iw := io.Pipe()
 	return &UserDevice{
-		tunCidr:        tunCidr,
-		outboundReader: or,
-		outboundWriter: ow,
-		inboundReader:  ir,
-		inboundWriter:  iw,
+		tunCidr:         tunCidr,
+		outboundChannel: make(chan *buffer.View),
+		inboundChannel:  make(chan *buffer.View),
 	}, nil
 }
 
 type UserDevice struct {
 	tunCidr *net.IPNet
 
-	outboundReader *io.PipeReader
-	outboundWriter *io.PipeWriter
-
-	inboundReader *io.PipeReader
-	inboundWriter *io.PipeWriter
+	outboundChannel chan *buffer.View
+	inboundChannel  chan *buffer.View
 }
 
 func (d *UserDevice) Activate() error {
@@ -46,18 +40,41 @@ func (d *UserDevice) NewMultiQueueReader() (io.ReadWriteCloser, error) {
 	return d, nil
 }
 
-func (d *UserDevice) Pipe() (*io.PipeReader, *io.PipeWriter) {
-	return d.inboundReader, d.outboundWriter
+func (d *UserDevice) Pipe() (<-chan *buffer.View, chan<- *buffer.View) {
+	return d.inboundChannel, d.outboundChannel
 }
 
 func (d *UserDevice) Read(p []byte) (n int, err error) {
-	return d.outboundReader.Read(p)
+	view, ok := <-d.outboundChannel
+	if !ok {
+		return 0, io.EOF
+	}
+	return view.Read(p)
 }
+func (d *UserDevice) WriteTo(w io.Writer) (n int64, err error) {
+	view, ok := <-d.outboundChannel
+	if !ok {
+		return 0, io.EOF
+	}
+	return view.WriteTo(w)
+}
+
 func (d *UserDevice) Write(p []byte) (n int, err error) {
-	return d.inboundWriter.Write(p)
+	view := buffer.NewViewWithData(p)
+	d.inboundChannel <- view
+	return view.Size(), nil
 }
+func (d *UserDevice) ReadFrom(r io.Reader) (n int64, err error) {
+	view := buffer.NewViewSize(2048)
+	n, err = view.ReadFrom(r)
+	if n > 0 {
+		d.inboundChannel <- view
+	}
+	return
+}
+
 func (d *UserDevice) Close() error {
-	d.inboundWriter.Close()
-	d.outboundWriter.Close()
+	close(d.inboundChannel)
+	close(d.outboundChannel)
 	return nil
 }
