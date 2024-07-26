@@ -3,6 +3,7 @@ package port_forwarder
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"sync/atomic"
 	"time"
@@ -14,7 +15,7 @@ import (
 )
 
 type ForwardConfig interface {
-	SetupPortForwarding(tunService *service.Service, l *logrus.Logger) (interface{}, error)
+	SetupPortForwarding(tunService *service.Service, l *logrus.Logger) (io.Closer, error)
 	ConfigDescriptor() string
 }
 
@@ -172,10 +173,15 @@ type PortForwardingOutgoingUdp struct {
 	localListenConnection *net.UDPConn
 }
 
+func (fwd PortForwardingOutgoingUdp) Close() error {
+	fwd.localListenConnection.Close()
+	return nil
+}
+
 func (cfg ForwardConfigOutgoingUdp) SetupPortForwarding(
 	tunService *service.Service,
 	l *logrus.Logger,
-) (interface{}, error) {
+) (io.Closer, error) {
 	localUdpListenAddr, err := net.ResolveUDPAddr("udp", cfg.localListen)
 	if err != nil {
 		return nil, err
@@ -264,10 +270,15 @@ type PortForwardingIncomingUdp struct {
 	outsideListenConnection *gonet.UDPConn
 }
 
+func (fwd PortForwardingIncomingUdp) Close() error {
+	fwd.outsideListenConnection.Close()
+	return nil
+}
+
 func (cfg ForwardConfigIncomingUdp) SetupPortForwarding(
 	tunService *service.Service,
 	l *logrus.Logger,
-) (interface{}, error) {
+) (io.Closer, error) {
 
 	conn, err := tunService.ListenUDP(fmt.Sprintf(":%d", cfg.port))
 	if err != nil {
@@ -350,10 +361,15 @@ type PortForwardingOutgoingTcp struct {
 	localListenConnection *net.TCPListener
 }
 
+func (fwd PortForwardingOutgoingTcp) Close() error {
+	fwd.localListenConnection.Close()
+	return nil
+}
+
 func (cf ForwardConfigOutgoingTcp) SetupPortForwarding(
 	tunService *service.Service,
 	l *logrus.Logger,
-) (interface{}, error) {
+) (io.Closer, error) {
 	localTcpListenAddr, err := net.ResolveTCPAddr("tcp", cf.localListen)
 	if err != nil {
 		return nil, err
@@ -471,10 +487,15 @@ type PortForwardingIncomingTcp struct {
 	outsideListenConnection net.Listener
 }
 
+func (fwd PortForwardingIncomingTcp) Close() error {
+	fwd.outsideListenConnection.Close()
+	return nil
+}
+
 func (cf ForwardConfigIncomingTcp) SetupPortForwarding(
 	tunService *service.Service,
 	l *logrus.Logger,
-) (interface{}, error) {
+) (io.Closer, error) {
 
 	listener, err := tunService.Listen("tcp", fmt.Sprintf(":%d", cf.port))
 	if err != nil {
@@ -539,7 +560,7 @@ type PortForwardingService struct {
 	tunService *service.Service
 
 	configPortForwardings map[string]ForwardConfig
-	portForwardings       map[string]interface{}
+	portForwardings       map[string]io.Closer
 }
 
 func (t *PortForwardingService) AddConfig(cfg ForwardConfig) {
@@ -547,13 +568,33 @@ func (t *PortForwardingService) AddConfig(cfg ForwardConfig) {
 }
 
 func (t *PortForwardingService) Activate() error {
+	return t.ActivateNew(t.configPortForwardings)
+}
 
-	for descriptor, config := range t.configPortForwardings {
+func (t *PortForwardingService) ActivateNew(newForwards map[string]ForwardConfig) error {
+
+	for descriptor, config := range newForwards {
 		fwd_instance, err := config.SetupPortForwarding(t.tunService, t.l)
 		if err == nil {
+			t.configPortForwardings[config.ConfigDescriptor()] = config
 			t.portForwardings[config.ConfigDescriptor()] = fwd_instance
 		} else {
 			t.l.Errorf("failed to setup port forwarding #%s: %s", descriptor, config.ConfigDescriptor())
+		}
+	}
+
+	return nil
+}
+
+func (t *PortForwardingService) CloseSelective(descriptors []string) error {
+
+	for _, descriptor := range descriptors {
+		delete(t.configPortForwardings, descriptor)
+		pf, ok := t.portForwardings[descriptor]
+		if ok {
+			t.l.Infof("closing port forwarding: %s", descriptor)
+			pf.Close()
+			delete(t.portForwardings, descriptor)
 		}
 	}
 

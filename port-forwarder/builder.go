@@ -2,6 +2,7 @@ package port_forwarder
 
 import (
 	"fmt"
+	"io"
 	"strconv"
 
 	"github.com/sirupsen/logrus"
@@ -32,22 +33,14 @@ type builderData struct {
 	factories map[string]configFactoryFnMap
 }
 
-func ConstructFromConfig(
-	tunService *service.Service,
+func ParseConfig(
 	l *logrus.Logger,
 	c *config.C,
-) (*PortForwardingService, error) {
-
-	pfService := &PortForwardingService{
-		l:                     l,
-		tunService:            tunService,
-		configPortForwardings: make(map[string]ForwardConfig),
-		portForwardings:       make(map[string]interface{}),
-	}
-
+	target ConfigList,
+) error {
 	builder := builderData{
 		l:         l,
-		target:    pfService,
+		target:    target,
 		factories: map[string]configFactoryFnMap{},
 	}
 
@@ -77,30 +70,30 @@ func ConstructFromConfig(
 
 		cfg_fwds_list, ok := cfg_fwds.(ymlListNode)
 		if !ok {
-			return nil, fmt.Errorf("yml node \"port_forwarding.%s\" needs to be a list", direction)
+			return fmt.Errorf("yml node \"port_forwarding.%s\" needs to be a list", direction)
 		}
 
 		for fwd_idx, node := range cfg_fwds_list {
 			node_map, ok := node.(ymlMapNode)
 			if !ok {
-				return nil, fmt.Errorf("child yml node of \"port_forwarding.%s\" needs to be a map", direction)
+				return fmt.Errorf("child yml node of \"port_forwarding.%s\" needs to be a map", direction)
 			}
 
 			protocols, ok := node_map["protocols"]
 			if !ok {
-				return nil, fmt.Errorf("child yml node of \"port_forwarding.%s\" needs to have a child \"protocols\"", direction)
+				return fmt.Errorf("child yml node of \"port_forwarding.%s\" needs to have a child \"protocols\"", direction)
 			}
 
 			protocols_list, ok := protocols.(ymlListNode)
 			if !ok {
-				return nil, fmt.Errorf("child yml node of \"port_forwarding.%s\" needs to have a child \"protocols\" that is a yml list", direction)
+				return fmt.Errorf("child yml node of \"port_forwarding.%s\" needs to have a child \"protocols\" that is a yml list", direction)
 			}
 
 			for _, proto := range protocols_list {
 				proto_str := ymlGetStringOfNode(proto)
 				factoryFn, ok := builder.factories[direction][proto_str]
 				if !ok {
-					return nil, fmt.Errorf("child yml node of \"port_forwarding.%s.%d.protocols\" doesn't support: %s", direction, fwd_idx, proto_str)
+					return fmt.Errorf("child yml node of \"port_forwarding.%s.%d.protocols\" doesn't support: %s", direction, fwd_idx, proto_str)
 				}
 
 				factoryFn(node_map)
@@ -108,7 +101,75 @@ func ConstructFromConfig(
 		}
 	}
 
+	return nil
+}
+
+func ConstructFromConfig(
+	tunService *service.Service,
+	l *logrus.Logger,
+	c *config.C,
+) (*PortForwardingService, error) {
+
+	pfService := &PortForwardingService{
+		l:                     l,
+		tunService:            tunService,
+		configPortForwardings: make(map[string]ForwardConfig),
+		portForwardings:       make(map[string]io.Closer),
+	}
+
+	ParseConfig(l, c, pfService)
+
+	c.RegisterReloadCallback(func(c *config.C) {
+		pfService.ReloadConfigAndApplyChanges(c)
+	})
+
 	return pfService, nil
+}
+
+type PortForwardingList struct {
+	configPortForwardings map[string]ForwardConfig
+}
+
+func (pfl PortForwardingList) AddConfig(cfg ForwardConfig) {
+	pfl.configPortForwardings[cfg.ConfigDescriptor()] = cfg
+}
+
+func (s *PortForwardingService) ReloadConfigAndApplyChanges(
+	c *config.C,
+) error {
+
+	s.l.Infof("reloading port forwarding configuration...")
+
+	pflNew := PortForwardingList{
+		configPortForwardings: map[string]ForwardConfig{},
+	}
+
+	err := ParseConfig(s.l, c, pflNew)
+	if err != nil {
+		return err
+	}
+
+	to_be_closed := []string{}
+	for old := range s.configPortForwardings {
+		_, corresponding_new_exists := pflNew.configPortForwardings[old]
+		if !corresponding_new_exists {
+			to_be_closed = append(to_be_closed, old)
+		}
+	}
+
+	s.CloseSelective(to_be_closed)
+
+	to_be_added := map[string]ForwardConfig{}
+	for new, cfg := range pflNew.configPortForwardings {
+		_, corresponding_old_exists := s.configPortForwardings[new]
+		if !corresponding_old_exists {
+			to_be_added[cfg.ConfigDescriptor()] = cfg
+		}
+	}
+
+	s.ActivateNew(to_be_added)
+
+	return nil
 }
 
 func (builder *builderData) convertToForwardConfigOutgoing(
