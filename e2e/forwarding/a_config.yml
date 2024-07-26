@@ -11,10 +11,10 @@ listen:
   port: 10001
 
 port_forwarding:
-  incoming:
-    tcp:
-      - port: 5201
-        forward_address: "127.0.0.1:15001"
+  inbound:
+    - port: 5201
+      forward_address: "127.0.0.1:15001"
+      protocols: [tcp]
 
 
 tun:

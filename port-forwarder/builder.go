@@ -1,7 +1,6 @@
 package port_forwarder
 
 import (
-	"errors"
 	"fmt"
 	"strconv"
 
@@ -10,6 +9,29 @@ import (
 	"github.com/slackhq/nebula/service"
 )
 
+func ymlGetStringOfNode(node interface{}) string {
+	return fmt.Sprintf("%v", node)
+}
+
+func ymlMapGetStringEntry(k string, m map[interface{}]interface{}) string {
+	v, ok := m[k]
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("%v", v)
+}
+
+type ymlListNode = []interface{}
+type ymlMapNode = map[interface{}]interface{}
+type configFactoryFn = func(yml_node ymlMapNode) error
+type configFactoryFnMap = map[string]configFactoryFn
+
+type builderData struct {
+	l         *logrus.Logger
+	target    ConfigList
+	factories map[string]configFactoryFnMap
+}
+
 func ConstructFromConfig(
 	tunService *service.Service,
 	l *logrus.Logger,
@@ -17,132 +39,124 @@ func ConstructFromConfig(
 ) (*PortForwardingService, error) {
 
 	pfService := &PortForwardingService{
-		l:          l,
-		tunService: tunService,
+		l:                     l,
+		tunService:            tunService,
+		configPortForwardings: make(map[string]ForwardConfig),
+		portForwardings:       make(map[string]interface{}),
 	}
 
-	var err error
-	pfService.configPortForwardingsUdpOutgoing, err = pfService.readOutgoingForwardingRulesFromConfig(c, "udp")
-	if err != nil {
-		return nil, err
+	builder := builderData{
+		l:         l,
+		target:    pfService,
+		factories: map[string]configFactoryFnMap{},
 	}
 
-	pfService.configPortForwardingsTcpOutgoing, err = pfService.readOutgoingForwardingRulesFromConfig(c, "tcp")
-	if err != nil {
-		return nil, err
+	in := configFactoryFnMap{}
+	in["udp"] = func(yml_node ymlMapNode) error {
+		return builder.convertToForwardConfigIncoming(l, yml_node, false)
 	}
-
-	pfService.configPortForwardingsUdpIncoming, err = pfService.readIncomingForwardingRulesFromConfig(c, "udp")
-	if err != nil {
-		return nil, err
+	in["tcp"] = func(yml_node ymlMapNode) error {
+		return builder.convertToForwardConfigIncoming(l, yml_node, true)
 	}
+	builder.factories["inbound"] = in
 
-	pfService.configPortForwardingsTcpIncoming, err = pfService.readIncomingForwardingRulesFromConfig(c, "tcp")
-	if err != nil {
-		return nil, err
+	out := configFactoryFnMap{}
+	out["udp"] = func(yml_node ymlMapNode) error {
+		return builder.convertToForwardConfigOutgoing(l, yml_node, false)
+	}
+	out["tcp"] = func(yml_node ymlMapNode) error {
+		return builder.convertToForwardConfigOutgoing(l, yml_node, true)
+	}
+	builder.factories["outbound"] = out
+
+	for _, direction := range [...]string{"inbound", "outbound"} {
+		cfg_fwds := c.Get("port_forwarding." + direction)
+		if cfg_fwds == nil {
+			continue
+		}
+
+		cfg_fwds_list, ok := cfg_fwds.(ymlListNode)
+		if !ok {
+			return nil, fmt.Errorf("yml node \"port_forwarding.%s\" needs to be a list", direction)
+		}
+
+		for fwd_idx, node := range cfg_fwds_list {
+			node_map, ok := node.(ymlMapNode)
+			if !ok {
+				return nil, fmt.Errorf("child yml node of \"port_forwarding.%s\" needs to be a map", direction)
+			}
+
+			protocols, ok := node_map["protocols"]
+			if !ok {
+				return nil, fmt.Errorf("child yml node of \"port_forwarding.%s\" needs to have a child \"protocols\"", direction)
+			}
+
+			protocols_list, ok := protocols.(ymlListNode)
+			if !ok {
+				return nil, fmt.Errorf("child yml node of \"port_forwarding.%s\" needs to have a child \"protocols\" that is a yml list", direction)
+			}
+
+			for _, proto := range protocols_list {
+				proto_str := ymlGetStringOfNode(proto)
+				factoryFn, ok := builder.factories[direction][proto_str]
+				if !ok {
+					return nil, fmt.Errorf("child yml node of \"port_forwarding.%s.%d.protocols\" doesn't support: %s", direction, fwd_idx, proto_str)
+				}
+
+				factoryFn(node_map)
+			}
+		}
 	}
 
 	return pfService, nil
 }
 
-func (pfService *PortForwardingService) readOutgoingForwardingRulesFromConfig(
-	c *config.C, protocol string,
-) ([]forwardConfigOutgoing, error) {
-	table := "port_forwarding.outgoing." + protocol
-	out := make([]forwardConfigOutgoing, 0)
-
-	r := c.Get(table)
-	if r == nil {
-		return nil, nil
+func (builder *builderData) convertToForwardConfigOutgoing(
+	_ *logrus.Logger,
+	m ymlMapNode,
+	isTcp bool,
+) error {
+	fwd_port := ForwardConfigOutgoing{
+		localListen:   ymlMapGetStringEntry("local_address", m),
+		remoteConnect: ymlMapGetStringEntry("remote_address", m),
 	}
 
-	rs, ok := r.([]interface{})
-	if !ok {
-		return nil, fmt.Errorf("%s failed to parse, should be an array of port forwardings", table)
+	var cfg ForwardConfig
+	if isTcp {
+		cfg = ForwardConfigOutgoingTcp{fwd_port}
+	} else {
+		cfg = ForwardConfigOutgoingUdp{fwd_port}
 	}
 
-	for i, t := range rs {
-		portForwardingConfig, err := convertToForwardConfigOutgoing(pfService.l, t)
-		if err != nil {
-			return nil, fmt.Errorf("%s port forwarding #%v; %s", table, i, err)
-		}
-		out = append(out, portForwardingConfig)
-	}
+	builder.target.AddConfig(cfg)
 
-	return out, nil
+	return nil
 }
 
-func (pfService *PortForwardingService) readIncomingForwardingRulesFromConfig(
-	c *config.C, protocol string,
-) ([]forwardConfigIncoming, error) {
-	table := "port_forwarding.incoming." + protocol
-	out := make([]forwardConfigIncoming, 0)
+func (builder *builderData) convertToForwardConfigIncoming(
+	_ *logrus.Logger,
+	m ymlMapNode,
+	isTcp bool,
+) error {
 
-	r := c.Get(table)
-	if r == nil {
-		return nil, nil
-	}
-
-	rs, ok := r.([]interface{})
-	if !ok {
-		return nil, fmt.Errorf("%s failed to parse, should be an array of port forwardings", table)
-	}
-
-	for i, t := range rs {
-		portForwardingConfig, err := convertToForwardConfigIncoming(pfService.l, t)
-		if err != nil {
-			return nil, fmt.Errorf("%s port forwarding #%v; %s", table, i, err)
-		}
-		out = append(out, portForwardingConfig)
-	}
-
-	return out, nil
-}
-
-func convertToForwardConfigOutgoing(_ *logrus.Logger, p interface{}) (forwardConfigOutgoing, error) {
-	fwd_port := forwardConfigOutgoing{}
-
-	m, ok := p.(map[interface{}]interface{})
-	if !ok {
-		return fwd_port, errors.New("could not parse port forwarding config")
-	}
-
-	toString := func(k string, m map[interface{}]interface{}) string {
-		v, ok := m[k]
-		if !ok {
-			return ""
-		}
-		return fmt.Sprintf("%v", v)
-	}
-
-	fwd_port.localListen = toString("local_address", m)
-	fwd_port.remoteConnect = toString("remote_address", m)
-
-	return fwd_port, nil
-}
-
-func convertToForwardConfigIncoming(_ *logrus.Logger, p interface{}) (forwardConfigIncoming, error) {
-	fwd_port := forwardConfigIncoming{}
-
-	m, ok := p.(map[interface{}]interface{})
-	if !ok {
-		return fwd_port, errors.New("could not parse port forwarding config")
-	}
-
-	toString := func(k string, m map[interface{}]interface{}) string {
-		v, ok := m[k]
-		if !ok {
-			return ""
-		}
-		return fmt.Sprintf("%v", v)
-	}
-
-	v, err := strconv.ParseUint(toString("port", m), 10, 32)
+	v, err := strconv.ParseUint(ymlMapGetStringEntry("port", m), 10, 32)
 	if err != nil {
-		return fwd_port, err
+		return err
 	}
-	fwd_port.port = uint32(v)
-	fwd_port.forwardLocalAddress = toString("forward_address", m)
 
-	return fwd_port, nil
+	fwd_port := ForwardConfigIncoming{
+		port:                uint32(v),
+		forwardLocalAddress: ymlMapGetStringEntry("forward_address", m),
+	}
+
+	var cfg ForwardConfig
+	if isTcp {
+		cfg = ForwardConfigIncomingTcp{fwd_port}
+	} else {
+		cfg = ForwardConfigIncomingUdp{fwd_port}
+	}
+
+	builder.target.AddConfig(cfg)
+
+	return nil
 }

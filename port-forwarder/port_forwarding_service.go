@@ -13,14 +13,55 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 )
 
-type forwardConfigOutgoing struct {
+type ForwardConfig interface {
+	SetupPortForwarding(tunService *service.Service, l *logrus.Logger) (interface{}, error)
+	ConfigDescriptor() string
+}
+
+type ConfigList interface {
+	AddConfig(cfg ForwardConfig)
+}
+
+type ForwardConfigOutgoing struct {
 	localListen   string
 	remoteConnect string
 }
 
-type forwardConfigIncoming struct {
+type ForwardConfigOutgoingUdp struct {
+	ForwardConfigOutgoing
+}
+
+func (cfg ForwardConfigOutgoingUdp) ConfigDescriptor() string {
+	return fmt.Sprintf("outbound.udp.%s.%s", cfg.localListen, cfg.remoteConnect)
+}
+
+type ForwardConfigOutgoingTcp struct {
+	ForwardConfigOutgoing
+}
+
+func (cfg ForwardConfigOutgoingTcp) ConfigDescriptor() string {
+	return fmt.Sprintf("outbound.tcp.%s.%s", cfg.localListen, cfg.remoteConnect)
+}
+
+type ForwardConfigIncoming struct {
 	port                uint32
 	forwardLocalAddress string
+}
+
+type ForwardConfigIncomingUdp struct {
+	ForwardConfigIncoming
+}
+
+func (cfg ForwardConfigIncomingUdp) ConfigDescriptor() string {
+	return fmt.Sprintf("inbound.udp.%d.%s", cfg.port, cfg.forwardLocalAddress)
+}
+
+type ForwardConfigIncomingTcp struct {
+	ForwardConfigIncoming
+}
+
+func (cfg ForwardConfigIncomingTcp) ConfigDescriptor() string {
+	return fmt.Sprintf("inbound.tcp.%d.%s", cfg.port, cfg.forwardLocalAddress)
 }
 
 type TimeoutCounter struct {
@@ -125,17 +166,16 @@ cleanup:
 type PortForwardingOutgoingUdp struct {
 	l          *logrus.Logger
 	tunService *service.Service
-	cfg        forwardConfigOutgoing
+	cfg        ForwardConfigOutgoingUdp
 	// net.Conn is thread-safe according to: https://pkg.go.dev/net#Conn
 	// no need for localListenConnection to protect by mutex
 	localListenConnection *net.UDPConn
 }
 
-func setupPortForwardingUdpOut(
+func (cfg ForwardConfigOutgoingUdp) SetupPortForwarding(
 	tunService *service.Service,
-	cfg forwardConfigOutgoing,
 	l *logrus.Logger,
-) (*PortForwardingOutgoingUdp, error) {
+) (interface{}, error) {
 	localUdpListenAddr, err := net.ResolveUDPAddr("udp", cfg.localListen)
 	if err != nil {
 		return nil, err
@@ -220,15 +260,14 @@ func (pt *PortForwardingOutgoingUdp) listenLocalPort() error {
 type PortForwardingIncomingUdp struct {
 	l                       *logrus.Logger
 	tunService              *service.Service
-	cfg                     forwardConfigIncoming
+	cfg                     ForwardConfigIncomingUdp
 	outsideListenConnection *gonet.UDPConn
 }
 
-func setupPortForwardingUdpIn(
+func (cfg ForwardConfigIncomingUdp) SetupPortForwarding(
 	tunService *service.Service,
-	cfg forwardConfigIncoming,
 	l *logrus.Logger,
-) (*PortForwardingIncomingUdp, error) {
+) (interface{}, error) {
 
 	conn, err := tunService.ListenUDP(fmt.Sprintf(":%d", cfg.port))
 	if err != nil {
@@ -307,15 +346,14 @@ func (pt *PortForwardingIncomingUdp) listenLocalOutsidePort() error {
 type PortForwardingOutgoingTcp struct {
 	l                     *logrus.Logger
 	tunService            *service.Service
-	cfg                   forwardConfigOutgoing
+	cfg                   ForwardConfigOutgoingTcp
 	localListenConnection *net.TCPListener
 }
 
-func setupPortForwardingTcpOut(
+func (cf ForwardConfigOutgoingTcp) SetupPortForwarding(
 	tunService *service.Service,
-	cf forwardConfigOutgoing,
 	l *logrus.Logger,
-) (*PortForwardingOutgoingTcp, error) {
+) (interface{}, error) {
 	localTcpListenAddr, err := net.ResolveTCPAddr("tcp", cf.localListen)
 	if err != nil {
 		return nil, err
@@ -429,15 +467,14 @@ func handleTcpClientConnection_generic(l *logrus.Logger, connA, connB net.Conn) 
 type PortForwardingIncomingTcp struct {
 	l                       *logrus.Logger
 	tunService              *service.Service
-	cfg                     forwardConfigIncoming
+	cfg                     ForwardConfigIncomingTcp
 	outsideListenConnection net.Listener
 }
 
-func setupPortForwardingTcpIn(
+func (cf ForwardConfigIncomingTcp) SetupPortForwarding(
 	tunService *service.Service,
-	cf forwardConfigIncoming,
 	l *logrus.Logger,
-) (*PortForwardingIncomingTcp, error) {
+) (interface{}, error) {
 
 	listener, err := tunService.Listen("tcp", fmt.Sprintf(":%d", cf.port))
 	if err != nil {
@@ -501,53 +538,23 @@ type PortForwardingService struct {
 	l          *logrus.Logger
 	tunService *service.Service
 
-	configPortForwardingsUdpOutgoing []forwardConfigOutgoing
-	configPortForwardingsTcpOutgoing []forwardConfigOutgoing
-	configPortForwardingsUdpIncoming []forwardConfigIncoming
-	configPortForwardingsTcpIncoming []forwardConfigIncoming
+	configPortForwardings map[string]ForwardConfig
+	portForwardings       map[string]interface{}
+}
 
-	portForwardingsUdpOutgoing map[uint32]*PortForwardingOutgoingUdp
-	portForwardingsTcpOutgoing map[uint32]*PortForwardingOutgoingTcp
-	portForwardingsUdpIncoming map[uint32]*PortForwardingIncomingUdp
-	portForwardingsTcpIncoming map[uint32]*PortForwardingIncomingTcp
+func (t *PortForwardingService) AddConfig(cfg ForwardConfig) {
+	t.configPortForwardings[cfg.ConfigDescriptor()] = cfg
 }
 
 func (t *PortForwardingService) Activate() error {
 
-	t.portForwardingsUdpOutgoing = make(map[uint32]*PortForwardingOutgoingUdp)
-	for id, config := range t.configPortForwardingsUdpOutgoing {
-		portForwarding, err := setupPortForwardingUdpOut(t.tunService, config, t.l)
-		if err != nil {
-			t.l.Errorf("failed to setup UDP-out port forwarding(%d): %+v", id, config)
+	for descriptor, config := range t.configPortForwardings {
+		fwd_instance, err := config.SetupPortForwarding(t.tunService, t.l)
+		if err == nil {
+			t.portForwardings[config.ConfigDescriptor()] = fwd_instance
+		} else {
+			t.l.Errorf("failed to setup port forwarding #%s: %s", descriptor, config.ConfigDescriptor())
 		}
-		t.portForwardingsUdpOutgoing[uint32(id)] = portForwarding
-	}
-
-	t.portForwardingsTcpOutgoing = make(map[uint32]*PortForwardingOutgoingTcp)
-	for id, config := range t.configPortForwardingsTcpOutgoing {
-		portForwarding, err := setupPortForwardingTcpOut(t.tunService, config, t.l)
-		if err != nil {
-			t.l.Errorf("failed to setup TCP-out port forwarding(%d): %+v", id, config)
-		}
-		t.portForwardingsTcpOutgoing[uint32(id)] = portForwarding
-	}
-
-	t.portForwardingsUdpIncoming = make(map[uint32]*PortForwardingIncomingUdp)
-	for id, config := range t.configPortForwardingsUdpIncoming {
-		portForwarding, err := setupPortForwardingUdpIn(t.tunService, config, t.l)
-		if err != nil {
-			t.l.Errorf("failed to setup UDP-in port forwarding(%d): %+v", id, config)
-		}
-		t.portForwardingsUdpIncoming[uint32(portForwarding.cfg.port)] = portForwarding
-	}
-
-	t.portForwardingsTcpIncoming = make(map[uint32]*PortForwardingIncomingTcp)
-	for id, config := range t.configPortForwardingsTcpIncoming {
-		portForwardings, err := setupPortForwardingTcpIn(t.tunService, config, t.l)
-		if err != nil {
-			t.l.Errorf("failed to setup TCP-in port forwarding(%d): %+v", id, config)
-		}
-		t.portForwardingsTcpIncoming[uint32(portForwardings.cfg.port)] = portForwardings
 	}
 
 	return nil

@@ -379,21 +379,15 @@ firewall:
 # a user-tun instead of a real one is used.
 # IMPORTANT: For incoming tunnels, don't forget to also open the firewall for the relevant ports.
 port_forwarding:
-  outgoing:
-    udp:
-    # format of local and remote address: <host/ip>:<port>
-    #- local_address: 127.0.0.1:3399
-    #  remote_address: 192.168.100.92:4499
-    tcp:
-    # format of local and remote address: <host/ip>:<port>
-    #- local_address: 127.0.0.1:3399
-    #  remote_address: 192.168.100.92:4499
-  incoming:
-    udp:
-    # format of forward_address: <host/ip>:<port>
-    #- port: 5599
-    #  forward_address: 127.0.0.1:5599
-    tcp:
-    # format of forward_address: <host/ip>:<port>
-    #- port: 5599
-    #  forward_address: 127.0.0.1:5599
+  outbound:
+  # format of local and remote address: <host/ip>:<port>
+  #- local_address: 127.0.0.1:3399
+  #  remote_address: 192.168.100.92:4499
+     # format of protocols lists (yml-list): [tcp], [udp], [tcp, udp]
+  #  protocols: [tcp, udp]
+  inbound:
+  # format of forward_address: <host/ip>:<port>
+  #- port: 5599
+  #  forward_address: 127.0.0.1:5599
+     # format of protocols lists (yml-list): [tcp], [udp], [tcp, udp]
+  #  protocols: [tcp, udp]
