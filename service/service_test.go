@@ -5,10 +5,12 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
 	"testing"
 	"time"
 
 	"dario.cat/mergo"
+	"github.com/sirupsen/logrus"
 	"github.com/slackhq/nebula/cert"
 	"github.com/slackhq/nebula/config"
 	"github.com/slackhq/nebula/e2e"
@@ -19,6 +21,9 @@ import (
 type m map[string]interface{}
 
 func newSimpleService(caCrt *cert.NebulaCertificate, caKey []byte, name string, udpIp net.IP, overrides m) *Service {
+
+	l := logrus.New()
+	l.Out = os.Stdout
 
 	vpnIpNet := &net.IPNet{IP: make([]byte, len(udpIp)), Mask: net.IPMask{255, 255, 255, 0}}
 	copy(vpnIpNet.IP, udpIp)
@@ -75,7 +80,7 @@ func newSimpleService(caCrt *cert.NebulaCertificate, caKey []byte, name string, 
 		panic(err)
 	}
 
-	s, err := New(&c)
+	s, err := New(&c, l)
 	if err != nil {
 		panic(err)
 	}
